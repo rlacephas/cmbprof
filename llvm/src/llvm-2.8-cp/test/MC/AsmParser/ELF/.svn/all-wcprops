@@ -1,0 +1,23 @@
+K 25
+svn:wc:ra_dav:version-url
+V 66
+/svn/llvm-project/!svn/ver/112849/llvm/trunk/test/MC/AsmParser/ELF
+END
+directive_section.s
+K 25
+svn:wc:ra_dav:version-url
+V 86
+/svn/llvm-project/!svn/ver/109290/llvm/trunk/test/MC/AsmParser/ELF/directive_section.s
+END
+dg.exp
+K 25
+svn:wc:ra_dav:version-url
+V 73
+/svn/llvm-project/!svn/ver/108938/llvm/trunk/test/MC/AsmParser/ELF/dg.exp
+END
+directive_previous.s
+K 25
+svn:wc:ra_dav:version-url
+V 87
+/svn/llvm-project/!svn/ver/112849/llvm/trunk/test/MC/AsmParser/ELF/directive_previous.s
+END

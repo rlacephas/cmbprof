@@ -1,0 +1,195 @@
+//===- CPCallRecord.h - (for: Feedback-directed inlining) -------*- C++ -*-===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+// CPCallRecord has become very procedural (vs OO)... should probably
+// do some re-design, but I don't have time for that.
+//
+// FunctionAttr should be a singleton class containing the func attr
+// map, with accessors that ensure the attr exists, and keep it
+// up-to-date.  Most of this already exists in CPCallRecord, but a
+// separate class would be able to keep track of valid/invalid
+// statuses, and recalculate when needed, much more easily and cleanly.
+//
+//===----------------------------------------------------------------------===//
+
+
+#ifndef LLVM_TRANSFORMS_FDO_FDOINLINER_CPCALLRECORD_H
+#define LLVM_TRANSFORMS_FDO_FDOINLINER_CPCALLRECORD_H
+
+#include "llvm/Support/CallSite.h"
+#include <map>
+#include <set>
+#include <list>
+#include <vector>
+
+namespace llvm {
+
+  // Benefit (dynamic instructions saved per call) for each arg
+  // impact.  Right now these values are very arbitrary...
+  namespace inlineWeights {
+    const unsigned instr  = 1;
+    const unsigned branch = 4;
+    const unsigned icall  = 2;
+    const unsigned alloca = 1;
+    const unsigned callReturn   = 10;  // call/return overhead
+  }
+
+
+  class Function;
+  class CPCallRecord;
+  class TStream;
+
+  struct ArgImpact {
+    unsigned instrRemIfConst;  // Instructions removed (estimate)
+    unsigned branchRemIfConst; // Branches removed
+    unsigned icallRemIfConst;  // Indirect calls resolved to direct calls
+    unsigned instrRemIfAlloca; // instructions removed by removing pointer
+  };
+
+  struct FunctionAttr {
+    bool valid;
+    unsigned size;
+    unsigned startSize;
+    unsigned inlineCount;
+    unsigned externCalls;
+    unsigned directCalls;
+    unsigned indirectCalls;
+    unsigned allocaSize;
+    bool cannotInline;
+    bool addressTaken;
+    unsigned args;
+    ArgImpact* argImpact;
+  };
+
+  // 0/NULL/false constant initializers
+  const static ArgImpact ZeroArgImpact = {0, 0, 0, 0};
+  const static FunctionAttr ZeroFunctionAttr = {false, 0, 0, 0, 0, 0, 0, 0, false, false, 0, NULL};
+
+
+  typedef std::set<Function*> FuncSet;
+  typedef std::map<CallSite, FuncSet> FuncSetMap;
+
+  typedef std::map<Function*,FunctionAttr> FuncAttrMap;
+
+  // A metric function takes a record and benefit; returns a double
+  typedef double (*FDOInlineMetric)(CPCallRecord&, double);
+  typedef std::map<std::string, FDOInlineMetric> MetricNameMap;
+
+  // (see below class definition)
+  //typedef std::list<CPCallRecord> CallList;
+
+  class CPCallRecord {
+  public:
+    CallSite      cs;
+    CPHistogram*  cphist;  // why is this * and not & ??
+    double        mval;
+    ArgImpact     totalImpact;  // impact of argument characteristics
+    bool          ignored;
+    FuncSet       history;
+    std::vector<std::string> historyString;
+    unsigned      ID;      // debug
+    unsigned      zID;     // zorbrist-hashed ID
+    
+    CPCallRecord(const CPCallRecord& rhs);
+    CPCallRecord(CallSite C, const CPHistogram* P = NULL, double V = 0);
+    CPCallRecord(const CPCallRecord& callRec, const CPCallRecord& oldRec, 
+                 Function* inlinedFunc, const CallSite newCall);
+    ~CPCallRecord();
+    
+    bool operator<(const CPCallRecord& rhs) const {return( mval < rhs.mval);};
+    bool operator>(const CPCallRecord& rhs) const {return( mval > rhs.mval);};
+
+    // Print methods to either a raw_ostream or a TStream.
+    // The raw_ostream versions delegate to the the TStream version.
+    // TStream versions print at the current TStream priority level.
+    void print(llvm::raw_ostream& stream, BasicBlock* BB = NULL, 
+               Function* caller = NULL, Function* callee = NULL) const;
+    void print(TStream& stream, BasicBlock* BB = NULL, 
+               Function* caller = NULL, Function* callee = NULL) const;
+    static void printCS(llvm::raw_ostream& stream, const std::string& pre, 
+                        CallSite cs, const std::string& post = "\n", 
+                        BasicBlock* BB = NULL, Function* caller = NULL, 
+                        Function* callee = NULL);
+    static void printCS(TStream& stream, const std::string& pre, 
+                        CallSite cs, const std::string& post = "\n", 
+                        BasicBlock* BB = NULL, Function* caller = NULL, 
+                        Function* callee = NULL);
+    void printHistory(llvm::raw_ostream& stream, 
+                      const std::string& sep=" ") const;
+    void printHistory(TStream& stream, 
+                      const std::string& sep=" ") const;
+
+    static bool selectMetric(const std::string& name = "null");
+    double evalMetric();
+
+    // true if there are factors that should flat-out inhibit inlining
+    bool neverInline();
+
+    int inlineSize();
+
+    // STATIC metrics
+    static double nullMetric(CPCallRecord& rec, double benefit);
+    static double neverMetric(CPCallRecord& rec, double benefit);
+    static double antiMetric(CPCallRecord& rec, double benefit);
+    static double benefitMetric(CPCallRecord& rec, double benefit);
+
+    // SIMPLE POINT metrics
+    static double meanMetric(CPCallRecord& rec, double benefit);
+    static double maxMetric(CPCallRecord& rec, double benefit);
+    static double minMetric(CPCallRecord& rec, double benefit);
+
+    // DISTRIBUTION metrics
+    // These metrics are multi-objective if multiple values are
+    // specified in FDIQList
+
+    // DISTRIBUTION POINT metrics
+    // Treats FDIQList values as quantile points
+    static double QPointLinearMetric(CPCallRecord& rec, double benefit);
+    static double QPointSqrtMetric(CPCallRecord& rec, double benefit);
+
+    // DISTRIBUTION RANGE metrics
+    // Treats FDIQList value pairs as quantile ranges
+    static double QRangeLinearMetric(CPCallRecord& rec, double benefit);
+    static double QRangeSqrtMetric(CPCallRecord& rec, double benefit);
+
+
+    static FuncAttrMap* getFuncAttrMap() { return(&_funcAttr); };
+    static int recalcFunctionAttr(Function* f);
+    static ArgImpact* getArgImpact(Function*, unsigned argNum);
+
+    static void freeStaticData();
+
+  private:
+    CPCallRecord();  // do not implement
+
+    double inlineBenefit();
+    double inlineCost();
+
+    // get the FunctionAttr; default: create & recalc if not found
+    static FunctionAttr* getFunctionAttr(Function* F, bool create = true);
+
+    static void initMetricMap();
+
+    static void calcConstantImpact(Value* V, ArgImpact* rc);
+    static void calcAllocaImpact(Value* V, ArgImpact* rc);
+    static unsigned calcBlockSize(BasicBlock* BB, FunctionAttr* attr = NULL);
+
+    static FDOInlineMetric _metric;     // function pointer to eval call sites
+    static MetricNameMap   _metricmap;  // name string --> function pointer
+    static FuncAttrMap     _funcAttr;   // code attribute cache
+
+    static unsigned CurrID;  // debug
+    
+  };
+  
+  typedef std::list<CPCallRecord> CallList;
+
+} // namespace llvm
+
+#endif

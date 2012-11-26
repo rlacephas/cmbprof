@@ -1,0 +1,165 @@
+//===- CombinedProfile.h --------------------------------------*- C++ -*---===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+// Definitions nescessary for loading/merging combined profiles.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef CPHISTOGRAM_H
+#define CPHISTOGRAM_H
+
+#include <stdio.h>
+
+#include "llvm/Analysis/ProfileInfoTypes.h"
+#include <vector>
+#include <list>
+#include <map>
+
+namespace llvm {
+	class CPHistogram;
+	class CombinedProfile;
+	class CombinedEdgeProfile;
+	class CombinedPathProfile;
+
+	typedef std::list<CPHistogram*> CPHistogramList;
+	typedef std::list<CPHistogram*>::iterator CPHistogramIterator;
+
+	// --------------------------------------------------------------------------
+	// CPHistogram - Implements a histogram used for both combined edge and
+	//              combined path profiling.
+	// --------------------------------------------------------------------------
+  class CPHistogram {
+	public:
+		CPHistogram();
+		CPHistogram(CombinedProfile* owner, CPHistogramList& hl);
+		CPHistogram(CombinedProfile* owner, CombinedProfEntry& cpe);
+
+		double getWeight() const;
+		double getSumOfSquares() const;
+    double getMinFreq() const;
+    double getMaxFreq() const;
+    double getBinWidth() const;
+    double getBinCenter(unsigned b) const;
+    double getBinUpperLimit(unsigned b) const;
+    double getBinLowerLimit(unsigned b) const;
+    unsigned whichBin(double v) const;
+    unsigned getBinCount() const;
+    unsigned getBinsUsed() const;
+    double getBinWeight(unsigned b) const;
+    double  getRangeWeight(double lb, double ub) const;
+    unsigned getNonZeros() const;
+
+		void setBinWeight(unsigned b, double v);
+    void ClearHistogram();
+    void ClearAddList();
+    void BuildFromAddList(CombinedProfile* owner);
+    void AddNewFreq(double f);
+
+	protected:
+		double _weight;
+		double _sumOfSquares;
+    double _minFreq;
+    double _maxFreq;
+		double _binWidth;
+
+    std::vector<double> _bins;
+    unsigned _nonZeros;
+
+	private:
+		void CalculateBinWidth();
+		std::list<double> _newFreqs;
+		CombinedProfile* _owner;
+  };
+
+	// --------------------------------------------------------------------------
+	// CombinedProfile - Implements a set of common functions and variables used
+	//                   by combined edge and combined path profiling.
+	// --------------------------------------------------------------------------
+  class CombinedProfile {
+  public:
+		CombinedProfile();
+
+		virtual void WriteToFile(FILE* f) = 0;
+		virtual bool BuildFromFile(FILE* f) = 0;
+		virtual void BuildHistogramsFromAddList(unsigned binCount) = 0;
+		virtual void PrintHistograms() = 0;
+
+		unsigned getBinCount() const;
+		unsigned getTrialCount() const;
+		void incTrialCount();
+
+	protected:
+		bool writeCPHeader(CombinedProfEntry e, FILE* f);
+		bool readCPHeader(CombinedProfEntry& e, FILE* f);
+
+		unsigned _trialCount;
+		unsigned _binCount;
+  };
+
+	typedef std::vector<CPHistogram> CEPHistogramVector;
+	typedef std::vector<CPHistogram>::iterator CEPHistogramIterator;
+
+  // --------------------------------------------------------------------------
+  // Combined Edge Profile
+  // --------------------------------------------------------------------------
+	typedef std::list<CombinedEdgeProfile*> CEPList;
+	typedef std::list<CombinedEdgeProfile*>::iterator CEPIterator;
+
+  class CombinedEdgeProfile : public CombinedProfile {
+	public:
+			CombinedEdgeProfile(unsigned hc);
+
+			void WriteToFile(FILE* f);
+			bool BuildFromFile(FILE* f);
+			bool BuildFromList(CEPList& hl, unsigned binCount);
+			void BuildHistogramsFromAddList(unsigned binCount);
+			void PrintHistograms();
+
+			unsigned getHistogramCount() const;
+			CPHistogram& operator[](const int index);
+
+	private:
+			// Edge histogram vector, indexed by edge number
+			CEPHistogramVector _histograms;
+  };
+
+	typedef std::list<CombinedPathProfile*> CPPList;
+	typedef std::list<CombinedPathProfile*>::iterator CPPIterator;
+
+  typedef std::map<unsigned,CPHistogram> CPPPathHistogramMap;
+  typedef std::map<unsigned,CPHistogram>::iterator CPPPathHistogramIterator;
+
+  typedef std::map<unsigned,CPPPathHistogramMap> CPPFunctionMap;
+	typedef std::map<unsigned,CPPPathHistogramMap>::iterator CPPFunctionIterator;
+
+  // --------------------------------------------------------------------------
+  // Combined Path Profile
+  // --------------------------------------------------------------------------
+	class CombinedPathProfile : public CombinedProfile {
+	public:
+		CombinedPathProfile();
+
+		void WriteToFile(FILE* f);
+		bool BuildFromFile(FILE* f);
+		bool BuildFromList(CPPList& hl, unsigned maxFunctions, unsigned binCount);
+		void BuildHistogramsFromAddList(unsigned binCount);
+		void PrintHistograms();
+
+		unsigned getFunctionCount() const;
+		void setCurrentFunction(const int index);
+		CPHistogram& operator[](const int index);
+
+	private:
+		CPPFunctionMap _functions;
+		unsigned _currentFunction;
+  };
+
+}
+
+#endif

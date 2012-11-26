@@ -1,0 +1,137 @@
+K 25
+svn:wc:ra_dav:version-url
+V 66
+/svn/llvm-project/!svn/ver/113352/llvm/trunk/test/MC/AsmParser/X86
+END
+x86_64-imm-widths.s
+K 25
+svn:wc:ra_dav:version-url
+V 86
+/svn/llvm-project/!svn/ver/104453/llvm/trunk/test/MC/AsmParser/X86/x86_64-imm-widths.s
+END
+x86_64-avx-encoding.s
+K 25
+svn:wc:ra_dav:version-url
+V 88
+/svn/llvm-project/!svn/ver/109295/llvm/trunk/test/MC/AsmParser/X86/x86_64-avx-encoding.s
+END
+x86_word_directive.s
+K 25
+svn:wc:ra_dav:version-url
+V 86
+/svn/llvm-project/!svn/ver/82419/llvm/trunk/test/MC/AsmParser/X86/x86_word_directive.s
+END
+x86_operands.s
+K 25
+svn:wc:ra_dav:version-url
+V 81
+/svn/llvm-project/!svn/ver/112386/llvm/trunk/test/MC/AsmParser/X86/x86_operands.s
+END
+x86_64-encoding.s
+K 25
+svn:wc:ra_dav:version-url
+V 84
+/svn/llvm-project/!svn/ver/109295/llvm/trunk/test/MC/AsmParser/X86/x86_64-encoding.s
+END
+x86_instruction_errors.s
+K 25
+svn:wc:ra_dav:version-url
+V 91
+/svn/llvm-project/!svn/ver/110890/llvm/trunk/test/MC/AsmParser/X86/x86_instruction_errors.s
+END
+x86_32-avx-clmul-encoding.s
+K 25
+svn:wc:ra_dav:version-url
+V 94
+/svn/llvm-project/!svn/ver/109248/llvm/trunk/test/MC/AsmParser/X86/x86_32-avx-clmul-encoding.s
+END
+dg.exp
+K 25
+svn:wc:ra_dav:version-url
+V 72
+/svn/llvm-project/!svn/ver/94857/llvm/trunk/test/MC/AsmParser/X86/dg.exp
+END
+x86_64-avx-clmul-encoding.s
+K 25
+svn:wc:ra_dav:version-url
+V 94
+/svn/llvm-project/!svn/ver/109248/llvm/trunk/test/MC/AsmParser/X86/x86_64-avx-clmul-encoding.s
+END
+x86_64-suffix-matching.s
+K 25
+svn:wc:ra_dav:version-url
+V 91
+/svn/llvm-project/!svn/ver/103535/llvm/trunk/test/MC/AsmParser/X86/x86_64-suffix-matching.s
+END
+x86_32-mismatched-add.s
+K 25
+svn:wc:ra_dav:version-url
+V 89
+/svn/llvm-project/!svn/ver/98404/llvm/trunk/test/MC/AsmParser/X86/x86_32-mismatched-add.s
+END
+x86_32-bit_cat.s
+K 25
+svn:wc:ra_dav:version-url
+V 83
+/svn/llvm-project/!svn/ver/104231/llvm/trunk/test/MC/AsmParser/X86/x86_32-bit_cat.s
+END
+x86_32-new-encoder.s
+K 25
+svn:wc:ra_dav:version-url
+V 87
+/svn/llvm-project/!svn/ver/113352/llvm/trunk/test/MC/AsmParser/X86/x86_32-new-encoder.s
+END
+x86_32-fma3-encoding.s
+K 25
+svn:wc:ra_dav:version-url
+V 89
+/svn/llvm-project/!svn/ver/109204/llvm/trunk/test/MC/AsmParser/X86/x86_32-fma3-encoding.s
+END
+x86_64-new-encoder.s
+K 25
+svn:wc:ra_dav:version-url
+V 87
+/svn/llvm-project/!svn/ver/113350/llvm/trunk/test/MC/AsmParser/X86/x86_64-new-encoder.s
+END
+x86_32-bit.s
+K 25
+svn:wc:ra_dav:version-url
+V 78
+/svn/llvm-project/!svn/ver/98476/llvm/trunk/test/MC/AsmParser/X86/x86_32-bit.s
+END
+x86_64-fma3-encoding.s
+K 25
+svn:wc:ra_dav:version-url
+V 89
+/svn/llvm-project/!svn/ver/109204/llvm/trunk/test/MC/AsmParser/X86/x86_64-fma3-encoding.s
+END
+x86_64-operands.s
+K 25
+svn:wc:ra_dav:version-url
+V 84
+/svn/llvm-project/!svn/ver/106725/llvm/trunk/test/MC/AsmParser/X86/x86_64-operands.s
+END
+x86_64-incl_decl.s
+K 25
+svn:wc:ra_dav:version-url
+V 84
+/svn/llvm-project/!svn/ver/98858/llvm/trunk/test/MC/AsmParser/X86/x86_64-incl_decl.s
+END
+x86_32-avx-encoding.s
+K 25
+svn:wc:ra_dav:version-url
+V 88
+/svn/llvm-project/!svn/ver/109295/llvm/trunk/test/MC/AsmParser/X86/x86_32-avx-encoding.s
+END
+x86_instructions.s
+K 25
+svn:wc:ra_dav:version-url
+V 85
+/svn/llvm-project/!svn/ver/113189/llvm/trunk/test/MC/AsmParser/X86/x86_instructions.s
+END
+x86_32-encoding.s
+K 25
+svn:wc:ra_dav:version-url
+V 84
+/svn/llvm-project/!svn/ver/109295/llvm/trunk/test/MC/AsmParser/X86/x86_32-encoding.s
+END

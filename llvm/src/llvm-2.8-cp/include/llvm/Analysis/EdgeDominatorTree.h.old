@@ -1,0 +1,67 @@
+//===- llvm/Analysis/EdgeDominatorTree.h ------------------------*- C++ -*-===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef LLVM_EDGE_DOMINATOR_TREE_H
+#define LLVM_EDGE_DOMINATOR_TREE_H
+
+#include <set>
+#include <map>
+#include <list>
+#include <vector>
+#include "llvm/BasicBlock.h"
+
+namespace llvm {
+	struct SPDNode;
+
+  typedef std::set<SPDNode*> SPDNodeSet;
+	typedef std::set<SPDNode*>::iterator SPDNodeSetIterator;
+
+	typedef std::list<SPDNode*> SPDNodeList;
+	typedef std::list<SPDNode*>::iterator SPDNodeListIterator;
+
+	typedef std::vector<SPDNode*> SPDNodeVector;
+	typedef std::vector<SPDNode*>::iterator SPDNodeVectorIterator;
+
+	typedef std::map<SPDNode*,SPDNodeSet> SPDNodeToSetMap;
+	typedef std::map<SPDNode*,SPDNodeSet>::iterator SPDNodeToSetIterator;
+
+	// Statistical Profiling Dominator Node
+	struct SPDNode {
+		BasicBlock* _source;
+		BasicBlock* _target;
+		unsigned _edgeIndex;
+
+		SPDNodeSet _succ;
+		SPDNodeSet _pred;
+
+		SPDNode* _domParent;
+		SPDNodeSet _domChildren;
+	};
+
+	class EdgeDominatorTree {
+	public:
+		EdgeDominatorTree(Module &M);
+		~EdgeDominatorTree();
+
+		unsigned getDominatorIndex(unsigned e);
+		unsigned getEdgeCount();
+
+		void writeToFile(std::string filename);
+
+	private:
+		SPDNodeVector _edges;
+
+		static void ComputeSPDTree(SPDNodeVector& nodes);
+	};
+} // End llvm namespace
+
+#endif

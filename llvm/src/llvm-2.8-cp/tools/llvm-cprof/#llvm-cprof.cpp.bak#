@@ -1,0 +1,591 @@
+//===- llvm-cprof.cpp - Read in and process llvmprof.out data files --------===//
+//
+//                      The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+// This tools is meant to combine a set of profiles into common combined
+// edge and path profiling files.
+//
+//===----------------------------------------------------------------------===//
+
+#include "llvm/LLVMContext.h"
+#include "llvm/Module.h"
+//#include "llvm/Analysis/PathNumbering.h"
+#include "llvm/Analysis/CPHistogram.h"
+//#include "llvm/Analysis/EdgeDominatorTree.h"
+#include "llvm/Analysis/CombinedProfile.h"
+#include "llvm/Bitcode/ReaderWriter.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Format.h"
+#include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/PrettyStackTrace.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/System/Signals.h"
+
+#include <cstdio>
+#include <vector>
+#include <map>
+
+#define VERBOSE(s) if( Verbose ) { s; }
+
+using namespace llvm;
+
+namespace {
+	// Uninstrumented bitcode file
+	cl::opt<std::string> BitcodeFile(cl::Positional,
+		cl::desc("<program bitcode file>"), cl::Required);
+
+	// Combined edge profiling cumulative storage file
+	cl::opt<std::string> CPEdgeFile("eo",
+		cl::init("edge.cp"), cl::value_desc("filename"),
+		cl::desc("Combined edge profiling cumulative storage file."));
+
+	// Combined path profiling cumulative storage file
+	cl::opt<std::string> CPPathFile("po",
+		cl::init("path.cp"), cl::value_desc("filename"),
+		cl::desc("Combined path profiling cumulative storage file."));
+
+	// Combined call profiling cumulative storage file
+	cl::opt<std::string> CPCallFile("co",
+		cl::init("call.cp"), cl::value_desc("filename"),
+		cl::desc("Combined call profiling cumulative storage file."));
+
+	// Number of bins that output histograms will have
+	cl::opt<unsigned> CPBinCount("bc",
+		cl::init(15), cl::value_desc("count"),
+		cl::desc("Combined profiling bin count."));
+
+	// print a selected histogram
+	cl::opt<unsigned> PrintEdgeHist("peh",
+		cl::init(0), cl::value_desc("edgeID"),
+		cl::desc("Print selected edge histogram"));
+
+	// print a selected histogram
+	cl::opt<unsigned> queryEdge("qe",
+		cl::init(0), cl::value_desc("edgeID"),
+		cl::desc("Inspect this edge."));
+
+	// Verbose: output specifics regarding which edges/ paths are merged
+	cl::opt<bool> 
+  Verbose("v", cl::init(false),
+          cl::desc("Output specifics about which edges/paths are merged."));
+
+	// Print bin usage statistics
+	cl::opt<bool>
+		BinsUsed("binuse",
+		cl::desc("Details of histogram bin usage."));
+
+	cl::opt<bool>
+		PrintEdgeHistogram("pe",
+		cl::desc("Print out a text representation of each histogram in "
+		"the CEP output file"));
+
+	cl::opt<bool>
+		PrintPathHistogram("pp",
+		cl::desc("Print out a text representation of each histogram in "
+		"the CPP output file"));
+
+	// Profiling files to be merged into the "master" combined profiling files
+	cl::list<std::string> InputFilenames(cl::Positional, cl::OneOrMore,
+		cl::desc("<input edge/path files>"));
+
+	// Handle to the current module
+	Module* currentModule = 0;
+
+  // ---------------------------------------------------------------------------
+ 
+  // load a module's bitcode into memory
+	bool loadModule() {
+		LLVMContext &Context = getGlobalContext();
+
+		// Read in the bitcode file ...
+		std::string ErrorMessage;
+		if (MemoryBuffer *Buffer = MemoryBuffer::getFileOrSTDIN(BitcodeFile,
+				&ErrorMessage)) {
+			currentModule = ParseBitcodeFile(Buffer, Context, &ErrorMessage);
+			delete Buffer;
+		}
+
+		// Ensure the module has been loaded
+		if (!currentModule) {
+			errs() << BitcodeFile << ": " << ErrorMessage << "\n";
+			return false;
+		}
+
+    /*
+		// Get function count of module
+		for( Module::iterator F = currentModule->begin(), E = currentModule->end();
+				F != E; F++ )
+			if( !F->isDeclaration() )
+				functionRef.push_back(F);
+    */
+
+    VERBOSE(errs() << "Finished processing bitcode\n");
+		return true;
+	}
+
+  // process info related to a trial's command line arguments
+	void readArgumentInfo(FILE *file) {
+		// get the argument list's length
+		unsigned savedArgsLength;
+		if( fread(&savedArgsLength, sizeof(unsigned), 1, file) != 1 ) {
+			errs() << "  warning: argument info header/data mismatch\n";
+			return;
+		}
+
+		// allocate a buffer, and get the arguments
+		char* args = new char[savedArgsLength+1];
+		if( fread(args, 1, savedArgsLength, file) != savedArgsLength )
+			errs() << "  warning: argument info header/data mismatch\n";
+
+		args[savedArgsLength] = '\0';
+		VERBOSE(errs() << "  '" << args << "'\n");
+		delete [] args; // cleanup dynamic string
+
+		// byte alignment
+		fseek(file, (4-(savedArgsLength&3))%4, SEEK_CUR);
+	}
+
+
+	// deserialize and return a new CEP
+  // return NULL on failure
+  CombinedEdgeProfile* readCombinedEdgeInfo(FILE* file) 
+  {
+    VERBOSE(errs() << "--> readCombinedEdgeInfo\n");
+  	CombinedEdgeProfile* cp = new CombinedEdgeProfile(currentModule);
+
+  	if( !cp->deserialize(file) )
+    {
+      delete cp;
+      errs() << "<-- readCombinedEdgeInfo (fail)\n";
+			return(NULL);
+    }
+
+    VERBOSE(errs() << "<-- readCombinedEdgeInfo\n");
+    return(cp);
+  }
+
+	// deserialize and return a new CCP
+  // return NULL on failure
+  CombinedCallProfile* readCombinedCallInfo(FILE* file) 
+  {
+    VERBOSE(errs() << "--> readCombinedCallInfo\n");
+  	CombinedCallProfile* cp = new CombinedCallProfile(*currentModule);
+
+  	if( !cp->deserialize(file) )
+    {
+      delete cp;
+      errs() << "<-- readCombinedCallInfo (fail)\n";
+			return(NULL);
+    }
+
+    VERBOSE(errs() << "<-- readCombinedCallInfo\n");
+    return(cp);
+  }
+
+	// deserialize and return a new CPP
+  // return NULL on failure
+	CombinedPathProfile* readCombinedPathInfo(FILE* file) 
+  {
+  	CombinedPathProfile* cp = new CombinedPathProfile(currentModule);
+    VERBOSE(errs() << "--> readCombinedPathInfo\n");
+  	if( !cp->deserialize(file) )
+    {
+      delete cp;
+      errs() << "<-- readCombinedPathInfo (fail)\n";
+			return(NULL);
+    }
+
+    VERBOSE(errs() << "<-- readCombinedPathInfo\n");
+    return(cp);
+  }
+
+  // process an input file which may contain a series of trials
+  // CP-from-singles are item 0 (front()) in their respective lists.
+	void processFile(FILE* file, CEPList* cepList, CPPList* cppList, 
+                   CCPList* ccpList) {
+		ProfilingType profType;
+		bool readEdge = false;
+		bool readPath = false;
+		bool readCall = false;
+    CombinedEdgeProfile* cep = NULL;
+    CombinedPathProfile* cpp = NULL;
+    CombinedCallProfile* ccp = NULL;
+
+    VERBOSE(errs() << "--> processFile\n");
+
+		// So long as there is an available header, read it and process it
+		while( fread(&profType, sizeof(ProfilingType), 1, file) > 0) {
+			// What to do with this specific profiling type
+			switch (profType) {
+			// This marks the beginning of a new trial
+			case ArgumentInfo:
+        VERBOSE(errs() << "ArgumentInfo\n");
+				readArgumentInfo (file);
+				readEdge = false;
+				readPath = false;
+				break;
+
+			// Found edge profile, so process and add it
+			case EdgeInfo:
+        VERBOSE(errs() << "EdgeInfo\n");
+				// make sure there is only 1 edge profile per trial
+				if( readEdge ) {
+					errs() << "  error: multiple edge profiles per trial.\n";
+					return;
+				}
+				VERBOSE(errs() << "  reading edge profile info.\n");
+				readEdge = true;
+        cepList->front()->addProfile(CPBinCount, file);
+				break;
+        
+      // Found path profile, so process and add it
+      case PathInfo:
+        VERBOSE(errs() << "PathInfo\n");
+				// make sure there is only 1 path profile per trial
+				if( readPath ) {
+					errs() << "  error: multiple path profiles per trial.\n";
+					return;
+				}
+				VERBOSE(errs() << "  reading path profile info.\n");
+				readPath = true;
+				cppList->front()->addProfile(CPBinCount, file);
+				break;
+
+      // Found call profile, so process and add it
+      case CallInfo:
+        VERBOSE(errs() << "CallInfo\n");
+				// make sure there is only 1 profile per trial
+				if( readCall ) {
+					errs() << "  error: multiple call profiles per trial.\n";
+					return;
+				}
+				VERBOSE(errs() << "  reading call profile info.\n");
+				readCall = true;
+				ccpList->front()->addProfile(CPBinCount, file);
+				break;
+  
+			// Found an edge histogram
+			case CombinedEdgeInfo:
+        VERBOSE(errs() << "CombinedEdgeInfo\n");
+				cep = readCombinedEdgeInfo(file);
+        if( cep != NULL)
+          cepList->push_back(cep);
+				break;
+
+			// Found a path histogram
+			case CombinedPathInfo:
+        VERBOSE(errs() << "CombinedEdgeInfo\n");
+				cpp = readCombinedPathInfo(file);
+        if(cpp != NULL)
+          cppList->push_back(cpp);
+				break;
+
+			// Found a call histogram
+			case CombinedCallInfo:
+        VERBOSE(errs() << "CombinedCallInfo\n");
+				ccp = readCombinedCallInfo(file);
+        if(ccp != NULL)
+          ccpList->push_back(ccp);
+				break;
+
+			// non-handled profiling type
+			default:
+				errs () << "  error: bad profiling file header\n";
+        exit(-1);
+			}
+		}
+    //errs() << "<-- processFile\n";
+	}
+}
+
+int main(int argc, char *argv[]) {
+	// Lists of combined profiles which need to be merged
+	CEPList newCEPs;
+	CPPList newCPPs;
+  CCPList newCCPs;
+  bool hasCEP = false;
+  bool hasCPP = false;
+  bool hasCCP = false;
+
+  CombinedEdgeProfile* cepOut = NULL;
+  CombinedPathProfile* cppOut = NULL;
+  CombinedCallProfile* ccpOut = NULL;
+
+  // Print a stack trace if we signal out.
+	sys::PrintStackTraceOnErrorSignal();
+  PrettyStackTraceProgram X(argc, argv);
+
+	// Call llvm_shutdown() on exit.
+  llvm_shutdown_obj Y;
+
+	// Setup command line arguments
+  cl::ParseCommandLineOptions(argc, argv,
+		"llvm combined edge/path profile merger\n");
+
+	// Get access to the current module
+	if( !loadModule() ) return 1;
+
+  // Put the from-singles CPs into the lists
+  newCEPs.push_back(new CombinedEdgeProfile(currentModule));
+  newCPPs.push_back(new CombinedPathProfile(currentModule));
+  newCCPs.push_back(new CombinedCallProfile(*currentModule));
+
+  // Iterate through each of the input files
+  bool error = false;
+	for( unsigned i = 0; i < InputFilenames.size(); i++ ) {
+		VERBOSE(errs() << "Processing '" << InputFilenames[i] << "' ...\n");
+
+		// Open a handle to the profiling input file
+		FILE* file = fopen(InputFilenames[i].c_str(),"rb");
+		if (!file) {
+			errs() << "  error: cannot open '" << InputFilenames[i] << "'\n";
+      error = true;
+      break;
+		}
+
+		// process data from the file
+		processFile(file, &newCEPs, &newCPPs, &newCCPs);
+
+		fclose(file);
+	}
+
+  if(!error)
+  {
+    //errs() << "Combine singles: " << newCEPs.front()->getTrialCount() << "\n";
+    // build a potential CEP from singles list
+    if(newCEPs.front()->getTotalWeight() > 0)
+      newCEPs.front()->BuildHistogramsFromAddList(CPBinCount);
+    else
+    {
+      // no singles: remove from list and deallocate
+      CombinedEdgeProfile* cep = newCEPs.front();
+      newCEPs.pop_front();
+      delete cep;
+    }
+
+    // build a potential CPP from singles list
+    if(newCPPs.front()->getTotalWeight() > 0)
+      newCPPs.front()->BuildHistogramsFromAddList(CPBinCount);
+    else
+    {
+      // no singles: remove from list and deallocate
+      CombinedPathProfile* cpp = newCPPs.front();
+      newCPPs.pop_front();
+      delete cpp;
+    }
+
+    // build a potential CCP from singles list
+    if(newCCPs.front()->getTotalWeight() > 0)
+      newCCPs.front()->BuildHistogramsFromAddList(CPBinCount);
+    else
+    {
+      // no singles: remove from list and deallocate
+      CombinedCallProfile* ccp = newCCPs.front();
+      newCCPs.pop_front();
+      delete ccp;
+    }
+
+    VERBOSE(errs() << "Building the output histograms ...\n");
+    VERBOSE(errs() << "  " <<
+            " E: " << newCEPs.size() << 
+            " P: " << newCPPs.size() <<
+            " C: " << newCCPs.size() << "\n");
+
+    hasCEP = (newCEPs.size() > 0);
+    hasCPP = (newCPPs.size() > 0);
+    hasCCP = (newCCPs.size() > 0);
+    
+    if(hasCEP)
+    {
+      cepOut = new CombinedEdgeProfile(currentModule);
+      cepOut->BuildFromList(newCEPs, CPBinCount);
+    }
+
+    if(hasCPP)
+    {
+      cppOut = new CombinedPathProfile(currentModule);
+      cppOut->BuildFromList(newCPPs, CPBinCount);
+    }
+
+    if(hasCCP)
+    {
+      ccpOut = new CombinedCallProfile(*currentModule);
+      ccpOut->BuildFromList(newCCPs, CPBinCount);
+    }
+
+    //VERBOSE(errs() << "Build from list\n");
+    //VERBOSE(errs() << " done build from list\n");
+  }
+
+  VERBOSE(errs() << "Begin Cleanup...\n");
+
+  // clean up loaded module
+  if (currentModule)
+    delete currentModule;
+
+	// Iterate and delete all CPs
+	for( CEPList::iterator CP = newCEPs.begin(),
+			E = newCEPs.end(); CP != E; ++CP )
+		delete *CP;
+  
+	for( CPPList::iterator CP = newCPPs.begin(),
+			E = newCPPs.end(); CP != E; ++CP )
+		delete *CP;
+
+	for( CCPList::iterator CP = newCCPs.begin(),
+			E = newCCPs.end(); CP != E; ++CP )
+		delete *CP;
+
+  VERBOSE(errs() << "Done Cleanup\n");
+
+
+  if(!error)
+  {
+    //errs() << "Printing histograms\n";
+    // Print out the histograms if the client has requested it
+    if( PrintEdgeHistogram )
+    {
+      if(hasCEP)
+        cepOut->print(outs());
+      else
+        errs() << "Cannot print non-existent CEP!\n";
+    }
+    //if( PrintPathHistogram )
+    //	cppOut.PrintHistograms();
+
+    //if(PrintEdgeHist > 0)
+    //  (*cepOut)[PrintEdgeHist]->print(outs());
+    
+    // write the combined edge profile
+    if(hasCEP)
+    {
+      VERBOSE(errs() << "CEP: " << cepOut->size() << " edges\n");
+      if( cepOut->size() > 0 ) 
+      {
+        FILE* file = fopen(CPEdgeFile.c_str(),"wb");
+        if (!file) 
+        {
+          errs() << "  error: cannot open '" << CPEdgeFile.c_str() 
+                 << "' for writing.\n";
+          return -1;
+        }
+        
+        VERBOSE(errs() << "Writing combined edge profile file '" 
+                << CPEdgeFile.c_str() << "' ...\n");
+        cepOut->serialize(file);
+        fclose(file);
+      }
+    }
+        
+    // write the combined path profile
+    if(hasCPP)
+    {
+      VERBOSE(errs() << "CPP: " << cppOut->getFunctionCount() 
+              << " functions, " << cppOut->size() << "paths\n");
+      if( cppOut->getFunctionCount() > 0 ) {
+        FILE* file = fopen(CPPathFile.c_str(),"wb");
+        if (!file) 
+        {
+          errs() << "  error: cannot open '" << CPPathFile.c_str() 
+                 << "' for writing.\n";
+          return -1;
+        }
+        
+        VERBOSE(errs() << "Writing combined path profile file '" 
+                << CPPathFile.c_str() << "' ...\n");
+        cppOut->serialize(file);            
+        fclose(file);
+      }
+    }
+
+    // write the combined call profile
+    if(hasCCP)
+    {
+      VERBOSE(errs() << "CCP: " << ccpOut->size() << " BBs with calls\n");
+      if( ccpOut->size() > 0 ) {
+        FILE* file = fopen(CPCallFile.c_str(),"wb");
+        if (!file) 
+        {
+          errs() << "  error: cannot open '" << CPCallFile.c_str() 
+                 << "' for writing.\n";
+          return -1;
+        }
+        
+        VERBOSE(errs() << "Writing combined call profile file '" 
+                << CPCallFile.c_str() << "' ...\n");
+        ccpOut->serialize(file);            
+        fclose(file);
+      }
+    }
+    
+    // print histogram bin usage statistics
+    if(BinsUsed)
+    {
+      if(hasCEP)
+      {
+        unsigned binBytes = 0;
+        unsigned headerBytes = 0;
+        unsigned totalBytes = 0;
+        unsigned totalBins = 0;
+        unsigned hcnt = cepOut->size();
+        for(unsigned i = 0; i < hcnt; i++)
+        {
+          unsigned bins = (*cepOut)[i]->getBinsUsed();
+          outs() << i << "\t" << bins << "\n";
+          totalBins += bins;
+        }
+        binBytes = totalBins * sizeof(CPHistogramBin);
+        headerBytes = hcnt * sizeof(CPHistogramHeader);
+        totalBytes = binBytes + headerBytes;
+        outs() << "Total Bins Used: " << totalBins << "\n";
+        outs() << "Total Bytes: " << headerBytes << " + " << binBytes 
+               << " = " << totalBytes << "\n";
+      }
+
+      if(hasCPP)
+      {
+        unsigned binBytes = 0;
+        unsigned headerBytes = 0;
+        unsigned totalBytes = 0;
+        unsigned totalBins = 0;
+        PathSet ps;
+        cppOut->getPathSet(ps);
+        for(PathSet::iterator i = ps.begin(), E = ps.end(); i != E; i++)
+        {
+          unsigned bins = (*cppOut)[*i].getBinsUsed();
+          outs() << i->first << "-" << i->second << "\t" << bins << "\n";
+          totalBins += bins;
+        }
+        binBytes = totalBins * sizeof(CPHistogramBin);
+        headerBytes = ps.size() * sizeof(CPHistogramHeader);
+        totalBytes = binBytes + headerBytes;
+        outs() << "Total Bins Used: " << totalBins << "\n";
+        outs() << "Total Bytes: " << headerBytes << " + " << binBytes 
+               << " = " << totalBytes << "\n";
+      }
+    }
+    //errs() << "free cepOut\n";
+    if(cepOut != NULL) delete cepOut;
+    if(cppOut != NULL) delete cppOut;
+    if(ccpOut != NULL) delete ccpOut;
+    //errs() << "free OK\n";
+
+  }
+
+  if(error)
+  {
+    errs() << "cprof: Done (failure)\n";
+    return(-1);
+  }
+  else
+  {    
+    VERBOSE(errs() << "cprof: Done (success)\n");
+    return 0;
+  }
+}

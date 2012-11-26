@@ -1,0 +1,228 @@
+//===- EdgeDominatorTree.cpp ----------------------------------*- C++ -*---===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+//===----------------------------------------------------------------------===//
+#define DEBUG_TYPE "generate-edge-dominance"
+
+#include "llvm/Module.h"
+#include "llvm/Pass.h"
+#include "llvm/Instructions.h"
+#include "llvm/Analysis/EdgeDominatorTree.h"
+#include "llvm/Analysis/Passes.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/raw_ostream.h"
+
+using namespace llvm;
+
+namespace {
+  class GenerateEdgeDominancePass: public ModulePass {
+  private:
+    bool runOnModule(Module &M);
+
+  public:
+    static char ID; // Pass identification, replacement for typeid
+    GenerateEdgeDominancePass() : ModulePass(ID) {}
+
+		// This pass only generates the edge profiling file; changes nothing
+    virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+      AU.setPreservesAll();
+    }
+  };
+}
+
+EdgeDominatorTree::EdgeDominatorTree(Module &M) {
+	unsigned edgeCounter = 0;
+
+	for( Module::iterator F = M.begin(), E = M.end(); F != E; F++ ) {
+		SPDNodeVector edgeList;
+
+		// Add the entry edge
+		SPDNode* entryEdge = new SPDNode;
+		entryEdge->_source = 0;
+		entryEdge->_target = F->begin();
+		entryEdge->_edgeIndex = edgeCounter++;
+		entryEdge->_domParent = 0;
+		edgeList.push_back(entryEdge);
+
+		// Add all edges to the list
+		for( Function::iterator BB = F->begin(), E = F->end(); BB != E; BB++ ) {
+			TerminatorInst* TI = BB->getTerminator();
+
+			for( unsigned s = 0, e = TI->getNumSuccessors(); s != e; s++ ) {
+				SPDNode* newEdge = new SPDNode;
+				newEdge->_source = BB;
+				newEdge->_target = TI->getSuccessor(s);
+				newEdge->_edgeIndex = edgeCounter++;
+				edgeList.push_back(newEdge);
+			}
+		}
+
+		// Compute predecessor/ successor information - this is stupid and slow,
+		// but the best for the current edge-numbering scheme
+		for( SPDNodeVectorIterator edge = edgeList.begin(), edgeEnd = edgeList.end();
+				edge != edgeEnd; edge++ ) {
+			for( SPDNodeVectorIterator succ = edgeList.begin(), succEnd = edgeList.end();
+					succ != succEnd; succ++ ) {
+				if( (*edge)->_target == (*succ)->_source) {
+					(*edge)->_succ.insert(*succ);
+					(*succ)->_pred.insert(*edge);
+				}
+			}
+		}
+
+		// Compute the tree from the edge list
+		ComputeSPDTree(edgeList);
+		_edges.insert(_edges.end(), edgeList.begin(), edgeList.end());
+	}
+}
+
+EdgeDominatorTree::~EdgeDominatorTree() {
+		for( SPDNodeVectorIterator N = _edges.begin(), E = _edges.end();
+				N != E; N++ )
+			delete *N;
+}
+
+unsigned EdgeDominatorTree::getDominatorIndex(unsigned e) {
+	if( !_edges[e]->_domParent)
+		return e;
+
+	return _edges[e]->_domParent->_edgeIndex;
+}
+
+unsigned EdgeDominatorTree::getEdgeCount() {
+	return _edges.size();
+}
+
+void EdgeDominatorTree::ComputeSPDTree(SPDNodeVector& nodes) {
+	SPDNodeList workingList;
+	SPDNodeToSetMap dominatorSets;
+
+	// Set the starting node's dominator
+	dominatorSets[nodes[0]].insert(nodes[0]);
+
+	// Set each nodes' potential dominators to the entire set
+	for( SPDNodeVectorIterator currentSet = ++nodes.begin(),
+		endSet = nodes.end();
+			currentSet != endSet; currentSet++ )
+		for( SPDNodeVectorIterator currentNode = nodes.begin(), endNode = nodes.end();
+				currentNode != endNode; currentNode++ )
+			dominatorSets[*currentSet].insert(*currentNode);
+
+	// Begin with the starting node
+	workingList.push_back(nodes[0]);
+
+	// Keep iterating while there exists a working set
+	while( workingList.size() ) {
+		// Pull out an arbitrary node form the set
+		SPDNodeListIterator workingNode = workingList.begin();
+		SPDNode* current = *workingNode;
+		workingList.erase(workingNode);
+
+		DEBUG(dbgs() << "processing node: "
+			<< (current->_source ? current->_source->getNameStr() : "(null)")
+			<< " -> " << current->_target->getNameStr() << "\n");
+
+		SPDNodeSet newSet;
+
+		// Take the intersection of each immediately preceeding node's
+		// dominator set
+		if( !current->_pred.empty() ) {
+			newSet = dominatorSets[*current->_pred.begin()];
+
+			for( SPDNodeSetIterator pred = ++current->_pred.begin(),
+					predEnd = current->_pred.end();
+					pred != predEnd; pred++ ) {
+				SPDNodeSet tempSet;
+				set_intersection(dominatorSets[*pred].begin(), dominatorSets[*pred].end(),
+					newSet.begin(), newSet.end(),
+					std::insert_iterator<SPDNodeSet>(tempSet,tempSet.begin()));
+				newSet = tempSet;
+			}
+		}
+
+		newSet.insert(current);
+
+		if( newSet != dominatorSets[current] || current->_pred.empty() ) {
+			dominatorSets[current] = newSet;
+
+			for( SPDNodeSetIterator succ = current->_succ.begin(), succEnd = current->_succ.end();
+					succ != succEnd; succ++ )
+				workingList.push_back(*succ);
+		}
+	}
+
+	// Remove node from its own dominator set
+	for( SPDNodeVectorIterator node = nodes.begin(),
+			end = nodes.end(); node != end; node++ )
+		dominatorSets[*node].erase(*node);
+
+	// Find the nearest dominator for each node
+	for( SPDNodeVectorIterator node = ++nodes.begin(),
+			nodeEnd = nodes.end(); node != nodeEnd; node++ ) {
+		for( SPDNodeSetIterator nodeInSet = dominatorSets[*node].begin(),
+				nodeInSetEnd = dominatorSets[*node].end(); nodeInSet != nodeInSetEnd; nodeInSet++ ) {
+			for( SPDNodeSetIterator nodeInSet2 = dominatorSets[*node].begin(),
+					nodeInSet2End = dominatorSets[*node].end(); nodeInSet2 != nodeInSet2End; nodeInSet2++ ) {
+				if( nodeInSet == nodeInSet2 )
+					continue;
+
+				if( dominatorSets[*nodeInSet].count(*nodeInSet2) )
+					dominatorSets[*node].erase(*nodeInSet2);
+			}
+		}
+	}
+
+	// Due to the nature of the algorith, each node will ONLY have 1 node in its
+	// dominator set
+	for( SPDNodeVectorIterator node = ++nodes.begin(),
+			nodeEnd = nodes.end(); node != nodeEnd; node++ ) {
+		(*node)->_domParent = *dominatorSets[*node].begin();
+		(*node)->_domParent->_domChildren.insert(*node);
+	}
+}
+
+static cl::opt<std::string>
+EdgeDominanceFilename("edge-dominance-file",
+	cl::init("edgedom.out"),
+	cl::value_desc("filename"),
+  cl::desc("Edge dominance file generated by -generate-edge-dominance"));
+
+char GenerateEdgeDominancePass::ID = 0;
+static RegisterPass<GenerateEdgeDominancePass> X("generate-edge-dominance",
+    "Generate a file containing edge dominance information, used by statistical profiling.");
+
+ModulePass *llvm::createGenerateEdgeDominancePass() {
+  return new GenerateEdgeDominancePass();
+}
+
+bool GenerateEdgeDominancePass::runOnModule (Module &M) {
+	EdgeDominatorTree edt(M);
+
+	// Prepare the output file
+	std::string errorInfo;
+	std::string filename = EdgeDominanceFilename;
+	raw_fd_ostream domFile(filename.c_str(), errorInfo);
+
+	if (!errorInfo.empty()) {
+		errs() << "Error opening '" << filename.c_str() <<"' for writing!";
+		errs() << "\n";
+		return false;
+	}
+
+	errs() << "Generating edge dominance file ...\n";
+
+	// Write each dominator edge to a file
+	for( unsigned i = 0; i < edt.getEdgeCount(); i++ ) {
+		unsigned domIndex = edt.getDominatorIndex(i);
+		domFile.write((char*)&domIndex, sizeof(unsigned));
+	}
+
+	return true;
+}

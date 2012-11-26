@@ -1,0 +1,17 @@
+K 25
+svn:wc:ra_dav:version-url
+V 56
+/svn/llvm-project/!svn/ver/111376/llvm/trunk/test/MC/ELF
+END
+dg.exp
+K 25
+svn:wc:ra_dav:version-url
+V 63
+/svn/llvm-project/!svn/ver/111376/llvm/trunk/test/MC/ELF/dg.exp
+END
+bss.ll
+K 25
+svn:wc:ra_dav:version-url
+V 63
+/svn/llvm-project/!svn/ver/111376/llvm/trunk/test/MC/ELF/bss.ll
+END

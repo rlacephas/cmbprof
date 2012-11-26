@@ -1,0 +1,726 @@
+//===- CombinedProfile.cpp ------------------------------------*- C++ -*---===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+//
+//===----------------------------------------------------------------------===//
+#define DEBUG_TYPE "cp-histogram"
+
+#include "llvm/Analysis/CombinedProfile.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/Format.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <cmath>
+
+using namespace llvm;
+
+CPHistogram::CPHistogram() : _weight(0),
+	_sumOfSquares(0), _minFreq(0), _maxFreq(0), _binWidth(0), _bins(0),
+	_nonZeros(0), _owner(0) {
+}
+
+CPHistogram::CPHistogram(CombinedProfile* owner, CPHistogramList& hl) :
+		_weight(0), _sumOfSquares(0), _minFreq(0), _maxFreq(0),
+		_binWidth(0), _bins(owner->getBinCount()), _nonZeros(0),
+		_owner(owner) {
+	if( !hl.size())
+		return;
+
+	// setup the boundries
+	CPHistogram& first = **hl.begin();
+	_minFreq      = first.getMinFreq();
+	_maxFreq      = first.getMaxFreq();
+	_nonZeros     = first.getNonZeros();
+	_weight       = first.getWeight();
+	_sumOfSquares = first.getSumOfSquares();
+
+	// Temporary trial count for computing sum of squares
+	unsigned tempTrialCount = first._owner->getTrialCount();
+
+	// Get the min/max of the new histogram
+	for( CPHistogramIterator H = ++hl.begin(), E = hl.end();
+			H != E; H++ ) {
+		_nonZeros += (*H)->getNonZeros();
+
+		// M[x] = M[a] + M[b] + (u[a] - u[b])^2 * (n[a]*n[b])/n[x]
+		double na = tempTrialCount;
+		double nb = (*H)->_owner->getTrialCount();
+		double delta = _weight/na - (*H)->_weight/nb;
+		_sumOfSquares += (*H)->getSumOfSquares() + delta*delta*na*nb/(na+nb);
+		tempTrialCount += nb;
+
+		_weight += (*H)->getWeight();
+
+		if( (*H)->_minFreq < _minFreq ) _minFreq = (*H)->_minFreq;
+		if( (*H)->_maxFreq > _maxFreq ) _maxFreq = (*H)->_maxFreq;
+	}
+
+	// There are still the 0 value histograms which must be incorporated
+	// into the variance
+	unsigned zeroCount = _owner->getTrialCount() - tempTrialCount;
+	_sumOfSquares += _weight*_weight*zeroCount/(tempTrialCount*(tempTrialCount+zeroCount));
+
+	// Calculate the bin width
+	CalculateBinWidth();
+
+	DEBUG(dbgs() << "    bin width:   " << format("%.5f",_binWidth)
+		<< "\n    lower bound: " << format("%.5f",_minFreq)
+		<< "\n    upper bound: " << format("%.5f",_maxFreq) << "\n");
+
+	// Fill each bin
+	for( unsigned i = 0; i < owner->getBinCount(); i++ ) {
+		// Set the bin initially to 0
+		_bins[i] = 0;
+
+		// Add the values and 0s from each histogram
+		for( CPHistogramIterator H = hl.begin(), E = hl.end();
+				H != E; H++ ) {
+			 // If the range weight is fucking huge then something's wrong
+			 double myvar = (*H)->getRangeWeight(getBinLowerLimit(i),getBinUpperLimit(i));
+	if( myvar > 1000 || myvar < 0 ) {
+		dbgs() << " range weight " << format("%.5lf",myvar) << " is fucked! for " << format("%.5lf",getBinLowerLimit(i)) << " -- " << format("%.5lf",getBinUpperLimit(i)) << " in the range of " 
+			<< format("%.5lf",(*H)->getMinFreq()) << " (" << i << ") -- " << format("%.5lf",this->getMaxFreq()) << ", width " << format("%.5lf",this->getBinWidth()) << "\n";
+	}
+			 
+			_bins[i] += (*H)->getRangeWeight(getBinLowerLimit(i),getBinUpperLimit(i));
+			}
+	}
+}
+
+CPHistogram::CPHistogram(CombinedProfile* owner, CombinedProfEntry& cpe) :
+	_weight(cpe.weight), _sumOfSquares(cpe.sumOfSquares), _minFreq(cpe.binMin),
+	_maxFreq(cpe.binMax), _binWidth(cpe.binWidth), _bins(owner->getBinCount()),
+	_nonZeros(cpe.nonZeros), _owner(owner) {
+}
+
+double CPHistogram::getWeight() const {
+	return _weight;
+}
+
+double CPHistogram::getSumOfSquares() const {
+	return _sumOfSquares;
+}
+
+double CPHistogram::getMinFreq() const {
+	return _minFreq;
+}
+
+double CPHistogram::getMaxFreq() const {
+	return _maxFreq;
+}
+
+double CPHistogram::getBinWidth() const {
+	return _binWidth;
+}
+
+double CPHistogram::getBinCenter(unsigned b) const {
+	return _minFreq + _binWidth*(b+0.5);
+}
+
+double CPHistogram::getBinUpperLimit(unsigned b) const {
+	return _minFreq + _binWidth*(b+1);
+}
+
+double CPHistogram::getBinLowerLimit(unsigned b) const {
+	return _minFreq + _binWidth*b;
+}
+
+unsigned CPHistogram::whichBin(double v) const {
+	double result = (v-_minFreq) / _binWidth + 0.000001; // becuase of floating point error
+	if(result < 0) result = 0;
+	return ((unsigned)result < _bins.size()) ? (unsigned)result : (_bins.size()-1);
+}
+
+unsigned CPHistogram::getBinCount() const {
+	return _bins.size();
+}
+
+unsigned CPHistogram::getBinsUsed() const {
+	unsigned binsUsed = 0;
+
+	for(unsigned i = 0; i < _bins.size(); i++ )
+		if( _bins[i] )
+			binsUsed++;
+
+	return binsUsed;
+}
+
+double CPHistogram::getBinWeight(unsigned b) const {
+	return _bins[b];
+}
+
+unsigned CPHistogram::getNonZeros() const {
+	return _nonZeros;
+}
+
+double CPHistogram::getRangeWeight(double lb, double ub) const {
+	if( ub < getBinLowerLimit(0) || lb > getBinUpperLimit(_bins.size()-1))
+		return 0;
+		
+	// Make sure the query is in range
+	if( lb < getBinLowerLimit(0) )
+		lb = getBinLowerLimit(0);
+	if(ub > getBinUpperLimit(_bins.size()-1) )
+		ub = getBinUpperLimit(_bins.size()-1);
+
+	double weight = 0;
+
+	unsigned lbBin = whichBin(lb);
+	unsigned ubBin = whichBin(ub);
+
+	// Just take a section out of the bin
+	if( lbBin == ubBin )
+		return (ub-lb)*_bins[lbBin]/_binWidth;
+
+	// grab the weights which are not complete bins
+	weight += (getBinUpperLimit(lbBin) - lb)*_bins[lbBin]/_binWidth;
+	weight += (getBinLowerLimit(ubBin) - ub)*_bins[ubBin]/_binWidth;
+
+	for( unsigned i = lbBin + 1; i < ubBin; i++ )
+		weight += _bins[i];
+
+	// Just to avoid cases of -0.0000
+	return (weight < 0) ? -weight : weight;
+}
+
+void CPHistogram::setBinWeight(unsigned b, double v) {
+		_bins[b] = v;
+}
+
+void CPHistogram::ClearHistogram() {
+	_bins.clear();
+
+	_minFreq = 0;
+	_maxFreq = 0;
+	_binWidth = 0;
+	_bins.resize(_owner->getBinCount());
+}
+
+void CPHistogram::ClearAddList() {
+	_newFreqs.clear();
+}
+
+void CPHistogram::BuildFromAddList(CombinedProfile* owner) {
+	_owner = owner;
+	ClearHistogram();
+
+	// Break out if there are no new frequencies to add
+	if( !_newFreqs.size())
+			return;
+
+	// Calculate histogram bounds FIXME becuase this COULD be 0
+	_minFreq = -1;
+	_maxFreq = -1;
+
+	for( std::list<double>::iterator NF = _newFreqs.begin(),
+			E = _newFreqs.end(); NF != E; NF++ ) {
+		if( *NF && (*NF < _minFreq || _minFreq < 0)) _minFreq = *NF;
+		if( *NF && *NF > _maxFreq) _maxFreq = *NF;
+	}
+
+	// If it turns out all of them were zeros
+	if(_minFreq == -1)
+		_minFreq = _maxFreq = 0;
+
+	CalculateBinWidth();
+
+	DEBUG(dbgs() << "    bin width:   " << format("%.5f",_binWidth)
+		<< "\n    lower bound: " << format("%.5f",_minFreq)
+		<< "\n    upper bound: " << format("%.5f",_maxFreq) << "\n");
+
+	// Add the new frequencies into the histogram
+	for( std::list<double>::iterator NF = _newFreqs.begin(),
+			E = _newFreqs.end(); NF != E; NF++ ) {
+		_weight += *NF;
+
+		if( *NF ) {
+			_nonZeros++;
+			_bins[whichBin(*NF)] += 1;
+		}
+	}
+
+	// Compute the sum of squared deviations
+	for( std::list<double>::iterator NF = _newFreqs.begin(),
+			E = _newFreqs.end(); NF != E; NF++ ) {
+		double delta = *NF - _weight/ _newFreqs.size();
+		_sumOfSquares += delta*delta;
+	}
+
+	// Account for those paths with 0 counts
+	unsigned zeroCount = _owner->getTrialCount() - _newFreqs.size();
+	_sumOfSquares += _weight*_weight*zeroCount/(_newFreqs.size()*(_newFreqs.size()+zeroCount));
+
+	ClearAddList();
+}
+
+void CPHistogram::AddNewFreq(double f) {
+	_newFreqs.push_back(f);
+}
+
+void CPHistogram::CalculateBinWidth() {
+	_binWidth = (_maxFreq - _minFreq) / _owner->getBinCount();
+
+	// Zero width bins do not make sense, so assign a minimum bin width
+	if( _binWidth < CP_HISTOGRAM_BIN_EPSILON) {
+		double centerPoint = (_maxFreq + _minFreq)*0.5;
+		_binWidth = CP_HISTOGRAM_BIN_EPSILON;
+		_maxFreq = centerPoint + _owner->getBinCount()*_binWidth*0.5;
+		_minFreq = centerPoint - _owner->getBinCount()*_binWidth*0.5;
+	}
+
+	// Shift up the histogram do not allow bins < 0
+	if( _minFreq < 0 ) {
+		_maxFreq -= _minFreq;
+		_minFreq = 0;
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Combined profile implementation
+// ----------------------------------------------------------------------------
+CombinedProfile::CombinedProfile() : _trialCount(0) {
+}
+
+unsigned CombinedProfile::getBinCount() const {
+	return _binCount;
+}
+
+unsigned CombinedProfile::getTrialCount() const {
+	return _trialCount;
+}
+
+void CombinedProfile::incTrialCount() {
+	_trialCount++;
+}
+
+bool CombinedProfile::writeCPHeader(CombinedProfEntry e, FILE* f) {
+	// Write the header to the cp file
+	if( !fwrite(&e.weight, sizeof(double), 1, f) ||
+			!fwrite(&e.sumOfSquares, sizeof(double), 1, f) ||
+			!fwrite(&e.binWidth, sizeof(double), 1, f) ||
+			!fwrite(&e.binMin, sizeof(double), 1, f) ||
+			!fwrite(&e.binMax, sizeof(double), 1, f) ||
+			!fwrite(&e.edgeId, sizeof(unsigned), 1, f) ||
+			!fwrite(&e.nonZeros, sizeof(unsigned), 1, f) ||
+			!fwrite(&e.binsUsed, sizeof(unsigned char), 1, f) )
+		return false;
+
+	return true;
+}
+
+bool CombinedProfile::readCPHeader(CombinedProfEntry& e, FILE* f) {
+	// Read in the header
+	if ( !fread(&e.weight, sizeof(double), 1, f) ||
+			!fread(&e.sumOfSquares, sizeof(double), 1, f) ||
+			!fread(&e.binWidth, sizeof(double), 1, f) ||
+			!fread(&e.binMin, sizeof(double), 1, f) ||
+			!fread(&e.binMax, sizeof(double), 1, f) ||
+			!fread(&e.edgeId, sizeof(unsigned), 1, f) ||
+			!fread(&e.nonZeros, sizeof(unsigned), 1, f) ||
+			!fread(&e.binsUsed, sizeof(unsigned char), 1, f) )
+		return false;
+
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+// Combined edge profile implementation
+// ----------------------------------------------------------------------------
+
+CombinedEdgeProfile::CombinedEdgeProfile(unsigned hc) : _histograms(hc) {
+}
+
+// Write CEP to file - store only those histograms with data
+void CombinedEdgeProfile::WriteToFile(FILE* f) {
+	unsigned edgeCount = 0;
+	// Calculate the number of histograms which have non-zero data
+	for( unsigned i = 0; i < _histograms.size(); i++ )
+		if( _histograms[i].getNonZeros() )
+			edgeCount++;
+			
+	//		errs() << "Found " << edgeCount << " non zeros!\n";
+
+	// Output information about the profile
+	unsigned header[4] = { CombinedEdgeInfo, _trialCount, edgeCount, _binCount };
+
+	if( fwrite(header, sizeof(unsigned), 4, f) != 4 ) {
+		errs() << "error: unable to write histogram to file.\n";
+		return;
+	}
+
+	for( unsigned i = 0; i < _histograms.size(); i++ ) {
+		CombinedProfEntry entry;
+		CPHistogram* histogram = &_histograms[i];
+
+		// Skip zero count histograms
+		if( !histogram->getNonZeros() ) {
+			DEBUG(dbgs() << "  skipping zero edge " << i << ".\n");
+			continue;
+		}
+
+		entry.edgeId = i;
+		entry.weight = histogram->getWeight();
+		entry.sumOfSquares = histogram->getSumOfSquares();
+		entry.binWidth = histogram->getBinWidth();
+		entry.binMin = histogram->getMinFreq();
+		entry.binMax = histogram->getMaxFreq();
+		entry.binsUsed = histogram->getBinsUsed();
+		entry.nonZeros = histogram->getNonZeros();
+
+		if( !writeCPHeader(entry, f) ) {
+			errs() << "error: unable to write histogram to file.\n";
+			return;
+		}
+
+		// Write data from each bin
+		for( unsigned j = 0; j < histogram->getBinCount(); j++ ) {
+			// Don't write empty bins
+			if( histogram->getBinWeight(j) == 0)
+				continue;
+
+			CombinedProfHistogramBin newBin;
+			newBin.index  = j;
+			newBin.weight = histogram->getBinWeight(j);
+
+			// write the bin to the file
+			if ( !fwrite(&newBin.index, sizeof(unsigned char), 1, f) ||
+					!fwrite(&newBin.weight, sizeof(double), 1, f)) {
+				errs() << "error: unable to write histogram to file.\n";
+				return;
+			}
+		}
+	}
+}
+
+bool CombinedEdgeProfile::BuildFromFile(FILE* f) {
+	unsigned edgeCount;
+
+	if( !fread(&_trialCount, sizeof(unsigned), 1, f) ||
+		  !fread(&edgeCount, sizeof(unsigned), 1, f) ||
+		  !fread(&_binCount, sizeof(unsigned), 1, f) ) {
+		errs() << "warning: combined edge profiling data corrupt.\n";
+		return false;
+	}
+
+	DEBUG(dbgs() << "Edge Count: " << edgeCount << "\n" );
+	DEBUG(dbgs() << "Bin Count:  " << _binCount << "\n" );
+
+	while( edgeCount-- ) {
+		CombinedProfEntry entry;
+
+		// Read in the header
+		if ( !readCPHeader(entry,f) ){
+			errs() << "warning: histogram header data corrupt.\n";
+			return false;
+		}
+
+		DEBUG(dbgs() << "Edge #" << entry.edgeId << "\n");
+		DEBUG(dbgs() << "Bin Used: " << (unsigned)entry.binsUsed << "\n");
+
+		// Make sure bins/ binsUsed are reasonable
+		if( _binCount < entry.binsUsed) {
+			errs() << "warning: histogram bin data corrupt.\n";
+			return false;
+		}
+
+		// Fill up the ith histogram
+		if( entry.edgeId < _histograms.size() )
+			_histograms[entry.edgeId] = CPHistogram(this,entry);
+
+		// Gather the data from each bin
+		while( entry.binsUsed-- ) {
+			CombinedProfHistogramBin newBin;
+
+			// Read in the bin
+			if ( !fread(&newBin.index, sizeof(unsigned char), 1, f) ||
+					!fread(&newBin.weight, sizeof(double), 1, f)) {
+				errs() << "warning: histogram bin data corrupt.\n";
+				return false;
+			}
+
+			_histograms[entry.edgeId].setBinWeight(newBin.index, newBin.weight);
+		}
+	}
+	return true;
+}
+
+bool CombinedEdgeProfile::BuildFromList(CEPList& hl, unsigned binCount) {
+	if( !hl.size() )
+		return true;
+
+	unsigned histogramCount = (*hl.begin())->getHistogramCount();
+	_histograms.resize(histogramCount);
+	_binCount = binCount;
+
+	// Update the trial count
+	for( CEPIterator CP = hl.begin(), E = hl.end();
+			CP != E; CP++ )
+		_trialCount += (*CP)->_trialCount;
+
+	// Merge each set of histograms
+	for( unsigned i = 0; i < histogramCount; i++ ) {
+		CPHistogramList cphl;
+
+		for( CEPIterator CP = hl.begin(), E = hl.end();
+				CP != E; CP++ )
+			if( (**CP)[i].getNonZeros() )
+				cphl.push_back(&(**CP)[i]);
+
+		_histograms[i] = CPHistogram(this, cphl);
+	}
+
+	return true;
+}
+
+void CombinedEdgeProfile::BuildHistogramsFromAddList(unsigned binCount) {
+	_binCount = binCount;
+
+	for( unsigned i = 0; i < _histograms.size(); i++ ) {
+		_histograms[i].BuildFromAddList(this);
+	}
+}
+
+void CombinedEdgeProfile::PrintHistograms () {
+	// Print the output histogram
+	for( unsigned i = 0; i < _histograms.size(); i++ ) {
+		outs() << "\nEdge #" << i << ":\n";
+		outs() << "Total Weight: " << format("%.3f",_histograms[i].getWeight()) << "\n";
+		outs() << "Non-Zero Count: " << _histograms[i].getNonZeros() << "\n";
+
+		for( unsigned b = 0; b < _histograms[i].getBinCount(); b++ ) {
+			outs() << format("%.5f", _histograms[i].getBinLowerLimit(b)) << " - "
+				<< format("%.5f", _histograms[i].getBinUpperLimit(b)) << ": "
+				<< format("%.5f", _histograms[i].getBinWeight(b)) << "\n";
+		}
+	}
+}
+
+unsigned CombinedEdgeProfile::getHistogramCount() const {
+	return _histograms.size();
+}
+
+CPHistogram& CombinedEdgeProfile::operator[](const int index) {
+	return _histograms[index];
+}
+
+// ----------------------------------------------------------------------------
+// Combined path profile implementation
+// ----------------------------------------------------------------------------
+CombinedPathProfile::CombinedPathProfile() {
+}
+
+void CombinedPathProfile::WriteToFile(FILE* f) {
+	// Write the CPP header
+	unsigned header[4] = { CombinedPathInfo, _trialCount, _functions.size(), _binCount };
+	if( fwrite(header, sizeof(unsigned), 4, f) != 4 ) {
+		errs() << "error: unable to write CPP to file.\n";
+		return;
+	}
+
+	// Iterate through each function to write it
+	for( CPPFunctionIterator F = _functions.begin(), E = _functions.end();
+			F != E; F++ ) {
+		// Write the function header
+		PathHeader ph = { F->first, F->second.size() };
+		if( fwrite(&ph, sizeof(PathHeader), 1, f) != 1 ) {
+			errs() <<
+			  "error: unable to write CPP histogram function header to file.\n";
+			return;
+		}
+
+		// Iterate through each executed path in the function
+		for( CPPPathHistogramIterator H = F->second.begin(), HE = F->second.end();
+				H != HE; H++ ) {
+			CPHistogram& hist = H->second;
+
+			// Build the histogram header
+			CombinedProfEntry entry;
+			entry.edgeId = H->first;
+			entry.weight = hist.getWeight();
+			entry.sumOfSquares = hist.getSumOfSquares();
+			entry.binWidth = hist.getBinWidth();
+			entry.binMin = hist.getMinFreq();
+			entry.binMax = hist.getMaxFreq();
+			entry.binsUsed = hist.getBinsUsed();
+			entry.nonZeros = hist.getNonZeros();
+
+			if( !writeCPHeader(entry, f) ) {
+				errs() << "error: unable to write histogram to file.\n";
+				return;
+			}
+
+			// Write data from each bin
+			for( unsigned j = 0; j < hist.getBinCount(); j++ ) {
+				// Don't write empty bins
+				if( hist.getBinWeight(j) == 0)
+					continue;
+
+				CombinedProfHistogramBin newBin;
+				newBin.index  = j;
+				newBin.weight = hist.getBinWeight(j);
+
+				// write the bin to the file
+				if ( !fwrite(&newBin.index, sizeof(unsigned char), 1, f) ||
+						!fwrite(&newBin.weight, sizeof(double), 1, f)) {
+					errs() << "error: unable to write histogram to file.\n";
+					return;
+				}
+			}
+		}
+	}
+}
+
+bool CombinedPathProfile::BuildFromFile(FILE* f) {
+	unsigned funcCount;
+
+	if( !fread(&_trialCount, sizeof(unsigned), 1, f) ||
+		  !fread(&funcCount, sizeof(unsigned), 1, f) ||
+		  !fread(&_binCount, sizeof(unsigned), 1, f) ) {
+		errs() << "warning: combined path profiling data corrupt.\n";
+		return false;
+	}
+
+	DEBUG(dbgs() << "Function Count: " << funcCount << "\n");
+	DEBUG(dbgs() << "Bin Count:      " << _binCount << "\n");
+
+	// Read in each function
+	while( funcCount-- ) {
+		// Get the function header
+		PathHeader ph;
+		if( fread(&ph, sizeof(PathHeader), 1, f) != 1 ) {
+			errs() <<
+				"error: unable to read CPP histogram function header from file.\n";
+			return false;
+		}
+
+		// Read in each path
+		while( ph.numEntries-- ) {
+			CombinedProfEntry entry;
+
+			// Read in the header
+			if ( !readCPHeader(entry,f) ){
+				errs() << "warning: CPP histogram header data corrupt.\n";
+				return false;
+			}
+
+			DEBUG(dbgs() << "Path #" << entry.edgeId << "\n");
+			DEBUG(dbgs() << "Bin Used: " << (unsigned)entry.binsUsed << "\n");
+
+			// Make sure bins/ binsUsed are reasonable
+			if( _binCount < entry.binsUsed) {
+				errs() << "warning: CPP histogram bin data corrupt.\n";
+				return false;
+			}
+
+			_functions[ph.fnNumber][entry.edgeId] = CPHistogram(this,entry);
+
+			// Gather the data from each bin
+			while( entry.binsUsed-- ) {
+				CombinedProfHistogramBin newBin;
+
+				// Read in the bin
+				if ( !fread(&newBin.index, sizeof(unsigned char), 1, f) ||
+						!fread(&newBin.weight, sizeof(double), 1, f)) {
+					errs() << "warning: CPP histogram bin data corrupt.\n";
+					return false;
+				}
+
+				_functions[ph.fnNumber][entry.edgeId].setBinWeight(newBin.index, newBin.weight);
+			}
+		}
+	}
+
+	return true;
+}
+
+bool CombinedPathProfile::BuildFromList(CPPList& hl, unsigned maxFunctions, unsigned binCount) {
+	if( !hl.size() )
+		return true;
+
+	_binCount = binCount;
+
+	// Update the trial count
+	for( CPPIterator CP = hl.begin(), E = hl.end();
+			CP != E; CP++ )
+		_trialCount += (*CP)->_trialCount;
+
+	// Iterate through all the potential functions in the program
+	for( unsigned i = 1; i <= maxFunctions; i++ ) {
+		// Function path combined profiling histogram map
+		std::map<unsigned,CPHistogramList> fpcphm;
+
+		// Iterate through each new histogram in the list
+		for( CPPIterator CP = hl.begin(), E = hl.end();
+				CP != E; CP++ ) {
+
+			// Iterate through the histogram of each path
+			for( CPPPathHistogramIterator H = (*CP)->_functions[i].begin(),
+					HE = (*CP)->_functions[i].end(); H != HE; H++ ) {
+				fpcphm[H->first].push_back(&H->second);
+			}
+		}
+
+		for( std::map<unsigned,CPHistogramList>::iterator H = fpcphm.begin(),
+				E = fpcphm.end(); H != E; H++ ) {
+			_functions[i][H->first] = CPHistogram(this, H->second);
+		}
+	}
+
+	return true;
+}
+
+void CombinedPathProfile::BuildHistogramsFromAddList(unsigned binCount) {
+	_binCount = binCount;
+
+	// Iterate through each function
+	for( CPPFunctionIterator F = _functions.begin(),
+			E = _functions.end(); F != E; F++ ) {
+		// Iterate through each histogram in the function
+		for( CPPPathHistogramIterator H = F->second.begin(),
+				E = F->second.end(); H != E; H++ ) {
+			H->second.BuildFromAddList(this);
+		}
+	}
+}
+
+void CombinedPathProfile::PrintHistograms() {
+	outs() << "Trial Count: " << _trialCount << "\n";
+	outs() << "Bin Count:   " << _binCount << "\n";
+
+		// Iterate through each function
+	for( CPPFunctionIterator F = _functions.begin(),
+			E = _functions.end(); F != E; F++ ) {
+		outs() << "----- Function #" << F->first << " -----\n";
+		// Iterate through each histogram in the function
+		for( CPPPathHistogramIterator H = F->second.begin(),
+				E = F->second.end(); H != E; H++ ) {
+			outs() << "Path #" << H->first << ":\n";
+			outs() << "Total Weight: " << format("%.3f",H->second.getWeight()) << "\n";
+			outs() << "Non-Zero Count: " << H->second.getNonZeros() << "\n";
+
+			for( unsigned b = 0; b < H->second.getBinCount(); b++ ) {
+				outs() << format("%.5f", H->second.getBinLowerLimit(b)) << " - "
+					<< format("%.5f", H->second.getBinUpperLimit(b)) << ": "
+					<< format("%.5f", H->second.getBinWeight(b)) << "\n";
+			}
+		}
+	}
+}
+
+unsigned CombinedPathProfile::getFunctionCount() const {
+	return _functions.size();
+}
+
+void CombinedPathProfile::setCurrentFunction(const int index) {
+	_currentFunction = index;
+}
+
+CPHistogram& CombinedPathProfile::operator[](const int index) {
+	return _functions[_currentFunction][index];
+}

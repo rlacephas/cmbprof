@@ -1,0 +1,391 @@
+//===- CPFactory.cpp ------------------------------------------*- C++ -*---===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+// Takes raw and/or combined profiles from one or more profile file
+// and combines the like-typed profiles (edge/path/call) into a single
+// combined profile of that type.
+//
+//===----------------------------------------------------------------------===//
+
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Format.h"
+#include "llvm/Analysis/ProfileInfoTypes.h"
+#include "llvm/Analysis/CombinedProfile.h"
+#include "llvm/Analysis/CPFactory.h"
+
+#include <vector>
+
+using namespace llvm;
+
+// Number of bins for constructed combined profiles
+cl::opt<unsigned> 
+CPBinCount("bc", cl::init(0), cl::value_desc("number"),
+           cl::desc("Number of bins for constructed combined profiles."));
+
+// last-resort fallback for bincount
+#define DEFAULT_BINCOUNT 20
+
+CPFactory::CPFactory(Module& M) : 
+  _callCP(NULL), _edgeCP(NULL), _pathCP(NULL), _M(M) 
+{
+}
+
+
+CPFactory::~CPFactory()
+{
+  clear();
+}
+
+void CPFactory::clear()
+{
+  if(_callCP != NULL) delete _callCP;
+  if(_edgeCP != NULL) delete _edgeCP;
+  if(_pathCP != NULL) delete _pathCP;
+}
+
+// repackage the single file name into a vector
+bool CPFactory::buildProfiles(const std::string& filename)
+{
+  FilenameVec v;
+  v.push_back(filename);
+  return(buildProfiles(v));
+}
+
+
+// repackage command-line list into a vector
+bool CPFactory::buildProfiles(cl::list<std::string>& filenames)
+{
+  FilenameVec v;
+  for( unsigned i = 0; i < filenames.size(); i++ ) 
+    v.push_back(filenames[i]);
+  return(buildProfiles(v));
+}
+
+
+bool CPFactory::buildProfiles(const FilenameVec& filenames)
+{
+  bool error = false;
+  ProfilingType profType;
+  bool rawEdges = false;
+  bool rawPaths = false;
+  bool rawCalls = false;
+  // only create if needed to avoid needlessly building edgedomtrees, etc.
+  CombinedEdgeProfile* cepFromRaw = NULL; // = new CombinedEdgeProfile(_M);
+  CombinedPathProfile* cppFromRaw = NULL; // = new CombinedPathProfile(_M);
+  CombinedCallProfile* ccpFromRaw = NULL; // = new CombinedCallProfile(_M);
+  CPList cepList, cppList, ccpList;
+
+  errs() << "--> CPFactory::buildProfiles (" << filenames.size() << ")\n";
+
+  // delete any old profiles
+  if(_edgeCP != NULL) delete _edgeCP;
+  if(_pathCP != NULL) delete _pathCP;
+  if(_callCP != NULL) delete _callCP;
+
+
+  unsigned fnum = 0;
+  for(unsigned E = filenames.size(); fnum < E; ++fnum)
+  {
+    errs() << "CPFactory::buildProfiles reading " 
+           << filenames[fnum].c_str() << "\n";
+		FILE* file = fopen(filenames[fnum].c_str(),"rb");
+		if (!file) 
+    {
+			errs() << "CPFactory::buildProfile Error: cannot open '" 
+             << filenames[fnum].c_str() << "'\n";
+      error = true;
+      break;
+		}
+    
+    
+    // Read the type and process the profile data segment.  Raw
+    // profiles are collected into single new combined profile
+    // (-FromRaw).  Combined profiles are collected in lists (-List)
+    // to be combined at the end.
+    while(fread(&profType, sizeof(ProfilingType), 1, file) > 0)
+    {
+      errs() << "CPFactory::buildProfile Profile type: " 
+             << profilingTypeToString(profType) << "\n";
+			// What to do with this specific profiling type
+			switch (profType) 
+      {
+			case ArgumentInfo:
+				skipArgumentInfo(file);
+				break;
+
+        //
+        // Raw Profiles: add them to the -FromRaw combined profile
+        //
+			case EdgeInfo:
+        if(cepFromRaw == NULL) cepFromRaw = new CombinedEdgeProfile(_M);
+        error = !cepFromRaw->addProfile(file);
+        rawEdges = true;
+				break;
+
+			case PathInfo:
+        if(cppFromRaw == NULL) cppFromRaw = new CombinedPathProfile(_M);
+        error = !cppFromRaw->addProfile(file);
+        rawPaths = true;
+				break;
+
+			case CallInfo:
+        if(ccpFromRaw == NULL) ccpFromRaw = new CombinedCallProfile(_M);
+        errs() << "ccpFromRaw=" << ccpFromRaw;
+        errs() << ", size=" << ccpFromRaw->size() << "\n";
+        error = !ccpFromRaw->addProfile(file);
+        rawCalls = true;
+				break;
+
+        //
+        // Combined Profiles: add them to the -List to be combined later
+        //
+			case CombinedEdgeInfo:
+        {
+          CombinedEdgeProfile* cep = new CombinedEdgeProfile(_M);
+          error = !cep->deserialize(file);
+          cepList.push_back(cep);
+          break;
+        }
+
+			case CombinedPathInfo:
+        {
+          CombinedPathProfile* cpp = new CombinedPathProfile(_M);
+          error = !cpp->deserialize(file);
+          cppList.push_back(cpp);
+          break;
+        }
+
+			case CombinedCallInfo:
+        {
+          CombinedCallProfile* ccp = new CombinedCallProfile(_M);
+          error = !ccp->deserialize(file);
+          ccpList.push_back(ccp);
+          break;
+        }
+
+			default:
+        error = true;
+
+			} // switch(profType)
+      
+      // stop if something went wrong
+      if(error) break;
+    } // while headers
+
+    // stop if something went wrong
+    if(error) break;
+  } // while files
+  
+  
+  // if there was an error, report it and skip right to cleanup
+  if(error)
+  {
+
+    errs() << "CPFactory::buildProfiles Error: failed to create profile\n"
+           << "  in file: " << filenames[fnum] << "\n"
+           << "  ptype  : " << profilingTypeToString(profType) << "\n";
+    if(cepFromRaw != NULL) delete cepFromRaw;
+    if(cppFromRaw != NULL) delete cppFromRaw;
+    if(ccpFromRaw != NULL) delete ccpFromRaw;
+  }
+  else
+  {
+    // if a CP should be build from raw profiles, commit it's add list
+    // and put it in the list of combined profiles.  Otherwise,
+    // deallocate it.
+
+    // The number of bins used is CPBinCount, if it was specified on
+    // the cmd line.  Otherwise, it is the maximum bincount of any
+    // existing CP in the list.  Failing that, it is DEFAULT_BINS
+    // (CombinedProfile.h)
+    if(rawEdges)
+    {
+      unsigned bins = cepFromRaw->calcBinCount(cepList, CPBinCount);
+      errs() << "CPFactory::buildProfiles: building edge histograms with " 
+             << bins << " bins\n";
+      cepFromRaw->buildHistograms(bins);
+      cepList.push_back(cepFromRaw);
+      errs() << " CP weight = " << format("%.2f", cepFromRaw->getTotalWeight())
+             << "\n";
+    }
+    //else delete cepFromRaw;
+    
+    if(rawPaths)
+    {
+      unsigned bins = cppFromRaw->calcBinCount(cppList, CPBinCount);
+      errs() << "CPFactory::buildProfiles: building path histograms with " 
+             << bins << " bins\n";
+      cppFromRaw->buildHistograms(bins);
+      cppList.push_back(cppFromRaw);
+      errs() << " CP weight = " << format("%.2f", cppFromRaw->getTotalWeight())
+             << "\n";
+    }
+    //else delete cppFromRaw;
+    
+    if(rawCalls)
+    {
+      unsigned bins = ccpFromRaw->calcBinCount(ccpList, CPBinCount);
+      errs() << "CPFactory::buildProfiles: building call histograms with " 
+             << bins << " bins";
+      ccpFromRaw->buildHistograms(bins);
+      ccpList.push_back(ccpFromRaw);
+      errs() << " CP weight = " << format("%.2f", ccpFromRaw->getTotalWeight())
+             << "\n";
+    }
+    //else delete ccpFromRaw;
+
+
+    // Combine all the profiles we've read to build the final combined profile
+    if(cepList.size() > 0)
+    {
+      errs() << "CPFactory::buildProfiles CEPs: " << cepList.size();
+      if(cepList.size() == 1)  // if there's only one, just use it
+      {
+        _edgeCP = (CombinedEdgeProfile*)cepList.front();
+        cepList.pop_front();
+      }
+      else
+      {
+        _edgeCP = new CombinedEdgeProfile(_M);
+        _edgeCP->buildFromList(cepList, CPBinCount);
+      }
+      errs() << " weight: " << format("%.2f", _edgeCP->getTotalWeight()) << "\n";
+    }
+    
+    if(cppList.size() > 0)
+    {
+      errs() << "CPFactory::buildProfiles CPPs: " << cppList.size();
+      if(cppList.size() == 1)
+      {
+        _pathCP = (CombinedPathProfile*)cppList.front();
+        cppList.pop_front();
+      }
+      else
+      {
+        _pathCP = new CombinedPathProfile(_M);
+        _pathCP->buildFromList(cppList, CPBinCount);
+      }
+      errs() << " weight: " << format("%.2f", _pathCP->getTotalWeight()) << "\n";
+    }
+    
+    if(ccpList.size() > 0)
+    {
+      errs() << "CPFactory::buildProfiles CCPs: " << ccpList.size();
+      if(ccpList.size() == 1)
+      {
+        _callCP = (CombinedCallProfile*)ccpList.front();
+        ccpList.pop_front();
+      }
+      else
+      {
+        _callCP = new CombinedCallProfile(_M);
+        _callCP->buildFromList(ccpList, CPBinCount);
+      }
+      errs() << " weight: " << format("%.2f", _callCP->getTotalWeight()) << "\n";
+    }
+
+  }
+
+  // Cleanup
+
+  // deallocate all the intermediate profiles.  This will catch the
+  // non-empty -FromRaw profiles we put in the lists.
+  for(CPList::iterator i = cepList.begin(), E = cepList.end(); i != E; ++i)
+    delete *i;
+  for(CPList::iterator i = cppList.begin(), E = cppList.end(); i != E; ++i)
+    delete *i;
+  for(CPList::iterator i = ccpList.begin(), E = ccpList.end(); i != E; ++i)
+    delete *i;
+
+  errs() << "<-- CPFactory::buildProfiles\n";
+
+  // return success if we built at least one CP
+  if( hasEdgeCP() || hasPathCP() || hasCallCP() )
+    return(true);
+  else
+  {
+    errs() << "CPFactory::buildProfiles Warning: did not create any profiles\n";
+    return(false);
+  }
+
+}
+
+
+
+// skip over a profile block for command line arguments
+bool CPFactory::skipArgumentInfo(FILE* file) 
+{
+  // get the argument list's length
+  unsigned savedArgsLength;
+  if( fread(&savedArgsLength, sizeof(unsigned), 1, file) != 1 ) 
+  {
+    errs() << "CPFactory::readArgumentInfo Error: bad header\n";
+    return(false);
+  }
+  
+  // data length plus byte alignment
+  fseek(file, savedArgsLength + (4-(savedArgsLength&3))%4, SEEK_CUR);
+
+  return(true);
+}
+
+
+void CPFactory::freeStaticData()
+{
+  errs() << "CPFactory::freeStaticData : freeing static data disabled.\n";
+  //CombinedEdgeProfile::freeStaticData();
+  //CombinedPathProfile::freeStaticData();
+  //CombinedCallProfile::freeStaticData();
+}
+
+
+const std::string& CPFactory::profilingTypeToString(ProfilingType p)
+{
+  static std::string argInfoStr     = "ArgumentInfo";
+  static std::string funcInfoStr    = "FunctionInfo";
+  static std::string blockInfoStr   = "BlockInfo";
+  static std::string edgeInfoStr    = "Raw Edge Profile";
+  static std::string pathInfoStr    = "Raw Path Profile";
+  static std::string traceInfoStr   = "BBTraceInfo";
+  static std::string optedgeInfoStr = "Raw Edge Profile (optimized)";
+  static std::string ceInfoStr      = "Combined Edge Profile";
+  static std::string cpInfoStr      = "Combined Path Profile";
+  static std::string callInfoStr    = "Raw Call Profile";
+  static std::string ccInfoStr      = "Combined Call Profile";
+  static std::string unknownInfoStr = "(unknowned profile type)";
+
+
+  switch(p)
+  {
+  case ArgumentInfo:
+    return(argInfoStr);
+  case FunctionInfo:
+    return(funcInfoStr);
+  case BlockInfo:
+    return(blockInfoStr);
+  case EdgeInfo:
+    return(edgeInfoStr);
+  case PathInfo:
+    return(pathInfoStr);
+  case BBTraceInfo:
+    return(traceInfoStr);
+  case OptEdgeInfo:
+    return(optedgeInfoStr);
+  case CombinedEdgeInfo:
+    return(ceInfoStr);
+  case CombinedPathInfo:
+    return(cpInfoStr);
+  case CallInfo:
+    return(callInfoStr);
+  case CombinedCallInfo:
+    return(ccInfoStr);
+  default:
+    return(unknownInfoStr);
+  }
+}

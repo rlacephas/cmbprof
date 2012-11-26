@@ -1,0 +1,472 @@
+//===- CombinedCallProfile.cpp --------------------------------*- C++ -*---===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+//
+//===----------------------------------------------------------------------===//
+
+#define DEBUG_TYPE "cp-callprof"
+
+#include "llvm/Analysis/ProfileInfoTypes.h"
+#include "llvm/Module.h"
+#include "llvm/IntrinsicInst.h"
+//#include "llvm/Support/Format.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/CallSite.h"
+
+#include "llvm/Analysis/CombinedProfile.h"
+#include "llvm/Analysis/CPHistogram.h"
+
+
+using namespace llvm;
+
+// ----------------------------------------------------------------------------
+// Combined call profile implementation
+// ----------------------------------------------------------------------------
+
+// static class variables for program structure mapping
+CallProfileMap CombinedCallProfile::_profmap;
+UnsignedVec    CombinedCallProfile::_funcIndex;
+FunctionVec    CombinedCallProfile::_funcRef;
+UnsignedVec    CombinedCallProfile::_entryCalls;
+unsigned       CombinedCallProfile::_histCnt = 0;
+
+
+CombinedCallProfile::CombinedCallProfile(Module& M)
+{
+  unsigned numFuncs = 0;
+
+  //errs() << "--> CombinedCallProfile(Module* M), Functions: " << numFuncs << "\n";
+
+  // see if program structure mappings have already been computed
+  if(_funcRef.size() > 0)
+  {
+    //errs() << "  Maps: already computed\n";
+    numFuncs = _funcRef.size();
+  }
+  else // do the work
+  {
+    unsigned fnum = 0;
+    _histCnt = 0;
+
+    //errs() << "  Maps: computing...\n";
+    // count real functions
+    for (Module::iterator F = M.begin(), E = M.end(); F != E; ++F) 
+    {
+      if (!F->isDeclaration())
+        numFuncs++;
+    }
+    _funcRef.resize(numFuncs, 0);
+    _funcIndex.resize(numFuncs, numFuncs); // init to invalid index
+    _entryCalls.clear();
+    
+    
+    
+    for (Module::iterator F = M.begin(), E = M.end(); F != E; ++F) 
+    {
+      if (F->isDeclaration()) continue;
+      
+      _funcRef[fnum] = F;
+      //errs() << "    F " << fnum << ": " << _funcRef[fnum]->getName().str() 
+      //       << "   (" << _funcRef[fnum]->size() << ")\n";
+      //
+      //errs() << "      scanning blocks: |";
+
+      // entry blocks need special treatment; peel first iteration
+      Function::iterator BB = F->begin();
+      if(hasFDOInliningCandidate(BB))
+      {
+        //errs() << ">";
+        _profmap[BB] = _histCnt;
+        _funcIndex.push_back(fnum);
+        _entryCalls.push_back(_histCnt);
+        _histCnt++;
+      }
+      else
+      {
+        //errs() << ")";
+      }
+      
+      ++BB;
+
+      // Scan for blocks with call sites.
+      for (Function::iterator E = F->end(); BB != E; ++BB) 
+      { 
+        if(hasFDOInliningCandidate(BB))
+        {
+          //errs() << "$";
+          _profmap[BB] = _histCnt++;
+          _funcIndex.push_back(fnum);
+        }
+        else
+        {
+          //errs() << ".";
+        }
+      }
+      //errs() << "|\n";
+      fnum++;
+    }
+
+    _entryCalls.push_back(0);   // terminator so we can check past last entry
+    errs() << "  Maps: done.\n";
+  }
+
+  // initialize histograms (NOT static!)
+  _histograms.resize(_histCnt, NULL);
+  _funcFreq.resize(numFuncs, 0);
+
+  //errs() << "  " << _funcRef.size() << " functions\n";
+  //errs() << "  " << _entryCalls.size()-1 << " entry blocks with calls\n";
+  //errs() << "  " << _histograms.size() << " histograms\n";
+  //errs() << "<-- CombinedCallProfile(Module* M)\n";
+}
+
+
+bool CombinedCallProfile::isEntry(BasicBlock* BB)
+{
+  return(BB->getPrevNode() == 0);
+} 
+ 
+   
+bool CombinedCallProfile::serialize(FILE* f)
+{
+	unsigned callCount = 0;
+
+  //errs() << "--> CCP::serialize\n";
+
+	// Calculate the number of histograms which have non-zero data
+	for( unsigned i = 0; i < _histograms.size(); i++ )
+		if( _histograms[i]->nonZero() )
+			callCount++;
+			
+	//		errs() << "Found " << callCount << " non zeros!\n";
+
+	// Output information about the profile
+  ProfilingType ptype = CombinedCallInfo;
+	if( (fwrite(&ptype, sizeof(unsigned), 1, f) != 1) ||
+      (fwrite(&_weight, sizeof(double), 1, f) != 1) ||
+      (fwrite(&callCount, sizeof(unsigned), 1, f) != 1) ||
+      (fwrite(&_bincount, sizeof(unsigned), 1, f) != 1) ) 
+  {
+		errs() << "error: unable to CPCall header to file.\n";
+		return(false);
+	}
+
+	for( unsigned i = 0; i < _histograms.size(); i++ ) {
+		// Skip zero count histograms
+		if( ! _histograms[i]->nonZero() )
+			continue;
+		
+    if( !_histograms[i]->serialize(i, f) ) 
+    {
+      errs() << "error: unable to write histogram " << i << " to file.\n";
+      return(false);
+    }
+	}
+
+  //errs() << "<-- CCP::serialize\n";
+  return(true);
+}
+
+
+bool CombinedCallProfile::deserialize(FILE* f)
+{
+	unsigned callCount;
+
+  //errs() << "--> CCP::deserialize\n";
+
+	if( !fread(&_weight, sizeof(double), 1, f) ||
+		  !fread(&callCount, sizeof(unsigned), 1, f) ||
+		  !fread(&_bincount, sizeof(unsigned), 1, f) ) {
+		errs() << "warning: combined call profiling data corrupt.\n";
+		return false;
+	}
+
+  for(unsigned h = 0; h < callCount; h++)
+  {
+    CPHistogram* newHist = new CPHistogram();
+    int index = newHist->deserialize(_bincount, _weight, f);
+    
+    if(index < 0) {
+      errs() << "CombinedCallProfile: error: unable to read histogram " 
+             << h << " of " << callCount << "\n";
+      delete newHist;
+      return false;
+    }
+
+    _histograms[index] = newHist;
+	}
+
+  // allocate any missing histograms
+  for(unsigned i = 0; i < _histograms.size(); i++)
+  {
+    if( _histograms[i] == NULL ) 
+      _histograms[i] = new CPHistogram();
+  }
+
+  //errs() << "<-- CCP::deserialize\n";
+	return true;
+}
+
+
+// Reads in a raw profile from the file and adds the
+// hierarchically-normalized call-block frequencies to the appropriate
+// histogram's add list.
+bool CombinedCallProfile::addProfile(FILE* file)
+{
+  //errs() << "--> CCP::addProfile\n";
+  
+  // get the number of profiled blocks in this profile (entry blocks +
+  // blocks with calls)
+  unsigned callCount;
+  if( fread(&callCount, sizeof(unsigned), 1, file) != 1 ) 
+  {
+    errs() << "  error: call profiling info has no header\n";
+    return(false);
+  }
+
+  int expectedCnt = _funcFreq.size()+_histograms.size()-(_entryCalls.size()-1);
+  if((int)callCount != expectedCnt)
+  {
+    errs() << "addProfile: Error: " << callCount << " profile entries, but " 
+           << expectedCnt << " needed (" 
+           << _funcFreq.size() << " functions + " << _histograms.size() 
+           << " blocks with calls (" << _entryCalls.size()-1 << " entries))\n";
+    return(false);
+  }
+
+
+  // read the counters
+  unsigned* callBuffer = new unsigned[callCount];
+  if( fread(callBuffer, sizeof(unsigned), callCount, file)
+      != callCount) {
+    delete [] callBuffer;
+    errs() << "  warning: call profiling info header/data mismatch\n";
+    return(false);
+  }
+
+  addWeight(1.0);
+
+  // allocate any missing histograms
+  for(unsigned i = 0; i < _histograms.size(); i++)
+  {
+    if( _histograms[i] == NULL ) 
+      _histograms[i] = new CPHistogram();
+  }
+
+  unsigned i = 0;   // index into callBuffer
+
+  // function entry frequencies are first
+  //errs() << "  Reading " << _funcFreq.size() << " function counters\n";
+  for(unsigned f = 0, E = _funcFreq.size(); f != E; ++f, ++i)
+  {
+    //errs() << "     i=" << i << " ";
+    //errs() << _funcRef[f]->getName().str() << ": ";
+    //errs() << callBuffer[i] << "\n";
+    _funcFreq[f] = callBuffer[i];
+  }
+
+  // ... followed by frequencies for block with calls
+  //errs() << "  Reading " << _histograms.size() << " block counters\n";
+  unsigned ec = 0;  // index in _entryCalls
+  for(unsigned h = 0, E = _histograms.size(); h < E; ++h, ++i)
+  {
+    if(h == _entryCalls[ec])  // entry blocks always have HN-freq=1
+    {
+      //errs() << "    h["<<h<<"] = 1 (entry " << ec << ")\n";
+      // this counter doesn't actually exist, so increment h!
+      _histograms[h++]->addToList(1.0);  
+      ec++;
+    }
+
+    //errs() << "    h["<<h<<"] = ";
+    unsigned funcFreq = _funcFreq[_funcIndex[h]];
+    if( (funcFreq > 0) && (callBuffer[i] > 0) )
+    {
+      double normFreq = (double)callBuffer[i] / (double) funcFreq;
+      //errs() << callBuffer[i] << "/" << funcFreq << " = " 
+      //       << normFreq << "\n";
+      _histograms[h]->addToList(normFreq);
+    }
+  }
+
+  delete [] callBuffer;
+  //errs() << "<-- CCP::addProfile\n";
+  return(true);
+}
+
+
+// Even though list is a generic CPList, it should only contain CCPs
+bool CombinedCallProfile::buildFromList(CPList& list, unsigned binCount)
+{
+  ProfilingType myType = getProfilingType();
+
+  if(binCount == 0)
+    _bincount = calcBinCount(list);
+  else
+    _bincount = binCount;
+
+  _weight = 0;
+
+	if(list.size() == 0)
+		return true;
+  
+  //errs() << "--> CCP::buildFromList (" << list.size() << ")\n";
+
+	unsigned callCount = 0;
+  for(CPList::iterator l = list.begin(), E = list.end(); l != E; ++l)
+  {
+    if((*l)->getProfilingType() != myType) continue;
+    callCount = (*l)->size();
+    break;
+  }
+
+  // delete current contents (if any)
+  for(unsigned i = 0; i < _histograms.size(); i++)
+    if(_histograms[i] != NULL)
+    {
+      delete _histograms[i];
+      _histograms[i] = NULL;
+    }
+
+  // reallocate to correct size
+  errs() << "  " << callCount << " histograms\n";
+	_histograms.resize(callCount, 0);  // fills with NULL pointers
+
+	// Update the trial count
+	for(CPList::iterator CP = list.begin(), E = list.end(); CP != E; ++CP)
+  {
+    if((*CP)->getProfilingType() != myType)
+    {
+      errs() << "CCP::buildFromList Warning: CP in list is not a CCP\n";
+      continue;
+    }
+    
+    CombinedCallProfile* cp = (CombinedCallProfile*)(*CP);
+		addWeight(cp->_weight);
+    unsigned calls = cp->size();
+    if(calls != callCount)
+      errs() << "BuildFromList: call count mismatch! " 
+             << calls << " vs " << callCount << "\n";
+  }
+
+	// Merge each set of histograms
+	for( unsigned i = 0; i < callCount; i++ )
+  {
+		CPHistogramList cphl;
+
+		for(CPList::iterator CP = list.begin(), E = list.end();	CP != E; ++CP)
+    {
+      if((*CP)->getProfilingType() != myType)
+        continue;
+
+      CombinedCallProfile* cp = (CombinedCallProfile*)(*CP);
+      CPHistogram& hist = (*cp)[i];
+			if( hist.nonZeroWeight() != 0 )
+				cphl.push_back(&hist);
+    }
+
+		_histograms[i] = new CPHistogram(_bincount, _weight, cphl);
+	}
+
+  //errs() << "<-- CCP::buildFromList\n";
+	return true;
+}
+
+
+
+CPHistogram& CombinedCallProfile::operator[](const CallIndex index)
+{
+  //if(index >= _histograms.size())
+  //{
+  //  errs() << "histogram index out of bounds: " << index 
+  //         << " (" << _histograms.size() << ")\n";
+  //  index = _histograms.size()-1;
+  //}
+
+  if( _histograms[index] == NULL )
+    _histograms[index] = new CPHistogram();
+	return *_histograms[index];
+}
+
+/*
+CPHistogram& CombinedCallProfile::operator[](const CallSite call)
+{
+  unsigned blockIndex = 0;
+
+  Instruction* i = call.getInstruction();
+  if( i == NULL )
+  {
+    errs() << "  got NULL instruction from CallSite\n";
+  }
+  else
+  {
+    BasicBlock* bb = i->getParent();
+    if( bb == NULL )
+    {
+      errs() << "  got NULL basic block from instruction\n";
+    }
+    else
+    {
+      blockIndex = _profmap[bb];
+    }
+  }
+
+  return( (*this)[blockIndex] );
+}
+*/
+
+CPHistogram& CombinedCallProfile::operator[](BasicBlock* bb)
+{
+  return( (*this)[_profmap[bb]] );
+}
+
+
+// Basic checking to see if an instruction is an inlining candidate
+bool CombinedCallProfile::isFDOInliningCandidate(Instruction* I)
+{
+  if(I == NULL) return(false);
+  
+  CallSite cs(cast<Value>(I));
+  // Not a call instruction
+  if(!cs) return(false);
+  
+  // Intrinsics can never be inlined
+  if(isa<IntrinsicInst>(I)) return(false);
+  
+  Function* callee = cs.getCalledFunction();
+  
+  // Indirect calls cannot be inlined (ignore the possibility they
+  // might resolve to direct calls later)
+  if(callee == NULL) return(false);
+  
+  // Ignore immediately-recursive calls.
+  if(callee == cs.getCaller()) return(false);
+  
+  // Can't inline without the definition (assumes whole-program analysis)
+  if(callee->isDeclaration()) return(false);
+  
+  // We're out of excuses
+  return(true);
+}
+
+
+// check if there is at least one inlining candidate in this BB
+bool CombinedCallProfile::hasFDOInliningCandidate(BasicBlock* BB)
+{
+  if(BB == NULL) return(false);
+  
+  for (BasicBlock::iterator I = BB->begin(), E = BB->end(); I != E; ++I) 
+  {
+    // One call is enough
+    if(isFDOInliningCandidate(&(*I)))
+      return(true);
+  }
+  
+  return(false);
+}

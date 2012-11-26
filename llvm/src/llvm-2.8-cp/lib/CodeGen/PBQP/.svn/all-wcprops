@@ -1,0 +1,35 @@
+K 25
+svn:wc:ra_dav:version-url
+V 61
+/svn/llvm-project/!svn/ver/113108/llvm/trunk/lib/CodeGen/PBQP
+END
+Math.h
+K 25
+svn:wc:ra_dav:version-url
+V 67
+/svn/llvm-project/!svn/ver/94514/llvm/trunk/lib/CodeGen/PBQP/Math.h
+END
+HeuristicBase.h
+K 25
+svn:wc:ra_dav:version-url
+V 77
+/svn/llvm-project/!svn/ver/112809/llvm/trunk/lib/CodeGen/PBQP/HeuristicBase.h
+END
+HeuristicSolver.h
+K 25
+svn:wc:ra_dav:version-url
+V 79
+/svn/llvm-project/!svn/ver/112807/llvm/trunk/lib/CodeGen/PBQP/HeuristicSolver.h
+END
+Solution.h
+K 25
+svn:wc:ra_dav:version-url
+V 72
+/svn/llvm-project/!svn/ver/113108/llvm/trunk/lib/CodeGen/PBQP/Solution.h
+END
+Graph.h
+K 25
+svn:wc:ra_dav:version-url
+V 68
+/svn/llvm-project/!svn/ver/95633/llvm/trunk/lib/CodeGen/PBQP/Graph.h
+END

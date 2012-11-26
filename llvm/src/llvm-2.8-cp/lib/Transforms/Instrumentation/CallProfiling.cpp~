@@ -1,0 +1,161 @@
+//===- CallProfiling.cpp - Insert counters for callgraph profiling --------===//
+//
+//                      The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+// This pass instruments the specified program with counters for
+// callgraph profiling.  One counter is inserted in the entry block of
+// each proceedure.  An additional counter is inserted into any
+// (non-entry) block containing a callsite.
+//
+//===----------------------------------------------------------------------===//
+#define DEBUG_TYPE "insert-call-profiling"
+
+#include "ProfilingUtils.h"
+#include "llvm/Module.h"
+#include "llvm/Pass.h"
+#include "llvm/IntrinsicInst.h"
+#include "llvm/Support/CallSite.h"
+
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Instrumentation.h"
+#include "llvm/ADT/Statistic.h"
+#include <set>
+using namespace llvm;
+
+
+namespace llvm{
+
+  class CallProfiler : public ModulePass {
+    bool runOnModule(Module &M);
+  public:
+    static char ID; // Pass identification, replacement for typeid
+    CallProfiler() : ModulePass(ID) {}
+
+    virtual const char *getPassName() const {return "Call Profiler";}
+
+    bool isFDOInliningCandidate(Instruction* I);
+    bool hasFDOInliningCandidate(BasicBlock* BB);
+  };
+}
+
+
+char CallProfiler::ID = 0;
+INITIALIZE_PASS(CallProfiler, "insert-call-profiling",
+                "Insert instrumentation for callgraph profiling", false, false);
+
+ModulePass *llvm::createCallProfilerPass() { return new CallProfiler(); }
+
+
+// Place a counter at the start of every BB that contains a call, and
+// every proceedure entry block.
+bool CallProfiler::runOnModule(Module &M) {
+  Function *Main = M.getFunction("main");
+  if (Main == 0) {
+    errs() << "WARNING: cannot insert callgraph profiling into a module"
+           << " with no main function!\n";
+    return false;  // No main, no instrumentation!
+  }
+
+
+  std::vector<BasicBlock*> CallBBs;
+  std::vector<BasicBlock*> EntryBBs;
+  for (Module::iterator F = M.begin(), E = M.end(); F != E; ++F) 
+  {
+    if (F->isDeclaration()) continue;
+
+    // always instrument the entry block
+    Function::iterator BB = F->begin();
+    EntryBBs.push_back(BB);
+    ++BB;
+
+    // Scan for call sites.
+    for (Function::iterator E = F->end(); BB != E; ++BB) 
+    {
+      if(hasFDOInliningCandidate(BB))
+        CallBBs.push_back(BB);
+    }
+  }
+
+  unsigned NumFuncs = EntryBBs.size();
+  unsigned NumCallBBs = CallBBs.size();
+  unsigned NumCounters = NumFuncs + NumCallBBs;
+
+  errs() << "\n\nCall Profiling: Inserting " << NumCounters << " counters: " 
+         << NumFuncs << " entry blocks and " << NumCallBBs 
+         << " blocks with calls\n\n\n";
+
+  // profile counter data
+  const Type *ATy = ArrayType::get(Type::getInt32Ty(M.getContext()), 
+                                   NumCounters);
+  GlobalVariable *Counters =
+    new GlobalVariable(M, ATy, false, GlobalValue::InternalLinkage,
+                       Constant::getNullValue(ATy), "CallProfCounters");
+
+  
+  // Counters are laid out with procedure entry counts first, followed
+  // by counts for blocks containing calls.
+
+  // Insert counters in procedure entry nodes
+  for(unsigned i = 0; i < NumFuncs; i++)
+    IncrementCounterInBlock(EntryBBs[i], i, Counters, false); 
+  // Insert counters at the start of blocks that have calls
+  // counter indexes are after the those for entry nodes ( +NumFuncs)
+  for(unsigned i = 0; i < NumCallBBs; i++)
+    IncrementCounterInBlock(CallBBs[i], i+NumFuncs, Counters, false);
+
+
+  // Add the initialization call to main.
+  InsertProfilingInitCall(Main, "llvm_start_call_profiling", Counters);
+  return true;
+}
+
+
+// Basic checking to see if an instruction is an inlining candidate
+bool CallProfiler::isFDOInliningCandidate(Instruction* I)
+{
+  if(I == NULL) return(false);
+  
+  CallSite cs(cast<Value>(I));
+  // Not a call instruction
+  if(!cs) return(false);
+  
+  // Intrinsics can never be inlined
+  if(isa<IntrinsicInst>(I)) return(false);
+  
+  Function* callee = cs.getCalledFunction();
+  
+  // Indirect calls cannot be inlined (ignore the possibility they
+  // might resolve to direct calls later)
+  if(callee == NULL) return(false);
+  
+  // Ignore immediately-recursive calls.
+  if(callee == cs.getCaller()) return(false);
+  
+  // Can't inline without the definition (assumes whole-program analysis)
+  if(callee->isDeclaration()) return(false);
+  
+  // We're out of excuses
+  return(true);
+}
+
+
+// check if there is at least one inlining candidate in this BB
+bool CallProfiler::hasFDOInliningCandidate(BasicBlock* BB)
+{
+  if(BB == NULL) return(false);
+  
+  for (BasicBlock::iterator I = BB->begin(), E = BB->end(); I != E; ++I) 
+  {
+    // One call is enough
+    if(isFDOInliningCandidate(&(*I)))
+      return(true);
+  }
+  
+  return(false);
+}

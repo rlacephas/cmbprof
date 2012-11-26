@@ -1,0 +1,82 @@
+10
+
+dir
+113352
+http://llvm.org/svn/llvm-project/llvm/trunk/test/CodeGen
+http://llvm.org/svn/llvm-project
+
+
+
+2010-09-08T02:00:34.824197Z
+113333
+grosbach
+has-props
+
+
+
+
+
+
+
+
+
+
+
+
+
+91177308-0d34-0410-b5e6-96231b3b80d8
+
+Thumb
+dir
+
+PowerPC
+dir
+
+ARM
+dir
+
+XCore
+dir
+
+PIC16
+dir
+
+CPP
+dir
+
+Alpha
+dir
+
+X86
+dir
+
+MSP430
+dir
+
+CBackend
+dir
+
+Thumb2
+dir
+
+CellSPU
+dir
+
+SPARC
+dir
+
+Mips
+dir
+
+Blackfin
+dir
+
+MBlaze
+dir
+
+Generic
+dir
+
+SystemZ
+dir
+
