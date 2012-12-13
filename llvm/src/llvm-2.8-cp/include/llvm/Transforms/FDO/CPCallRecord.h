@@ -33,12 +33,12 @@ namespace llvm {
   // Benefit (dynamic instructions saved per call) for each arg
   // impact.  Right now these values are very arbitrary...
   namespace inlineWeights {
-    const unsigned instr  = 1;
-    const unsigned branch = 4;
-    const unsigned icall  = 2;
-    const unsigned alloca = 1;
-    const unsigned oneblock = 5;
-    const unsigned callReturn   = 10;  // call/return overhead
+    const unsigned instr  = 5;
+    const unsigned branch = 10;
+    const unsigned icall  = 6;
+    const unsigned alloca = 5;
+    const unsigned oneblock = 10;
+    const unsigned callReturn   = 15;  // call/return overhead
   }
 
 
