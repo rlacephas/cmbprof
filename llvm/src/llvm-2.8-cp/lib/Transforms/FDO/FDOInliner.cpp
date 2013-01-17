@@ -275,12 +275,17 @@ unsigned FDOInliner::initialize(Module& M, CallGraph& CG, const TargetData* TD)
   for(CallList::iterator i = _candidates.begin(), E = _candidates.end();
       i != E; ++i)
   {
-    i->evalMetric();
+    i->evalMetric(); // RR: could use random values here
   }
 
   // sort (asending) all inlining candidates by metric value
   debug(vl::info) << "    Sort canidates\n";
   _candidates.sort();
+  // RR: candidates List shuffle; other option is to change the value of mval to random in evalMetric, preserving original values
+  // vector<int> myVector(_candidates.size());
+  // copy(_candidates.begin(), myList.end(), myVector.begin());
+  // random_shuffle(myVector.begin(), myVector.end());
+  // _candidates -> assign(myVector.begin(), myVector.end());
 
   CPFactory::freeStaticData();
 
