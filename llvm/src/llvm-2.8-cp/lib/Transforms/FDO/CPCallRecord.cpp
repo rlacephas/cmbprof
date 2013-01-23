@@ -873,7 +873,7 @@ double CPCallRecord::benefitMetric(CPCallRecord& rec, double benefit)
 
 double CPCallRecord::neverMetric(CPCallRecord& rec, double benefit) 
 { 
-  return(-1000.0);   // to assure "never" inlining and avoid rewriting much code
+  return(-1.0);
 }
 
 // try to do the worst possible inlining: do the least benefit with
